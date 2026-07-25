@@ -88,6 +88,42 @@ class WhatsAppClient:
             }
         )
 
+    async def send_flow(
+        self,
+        to: str,
+        flow_id: str,
+        header: str,
+        body: str,
+        cta: str,
+        flow_token: str,
+        screen: str = "WELCOME",
+        footer: str = "",
+    ) -> dict:
+        """Opens a WhatsApp Flow (a native multi-field form) — `flow_cta` is
+        required by the Graph API despite not being documented in most
+        examples, or the send fails with error 131008. `flow_token` should
+        be something you can trace back to this conversation/profile when
+        the completed submission arrives on the webhook."""
+        interactive: dict = {
+            "type": "flow",
+            "header": {"type": "text", "text": header},
+            "body": {"text": body},
+            "action": {
+                "name": "flow",
+                "parameters": {
+                    "flow_message_version": "3",
+                    "flow_id": flow_id,
+                    "flow_cta": cta,
+                    "flow_token": flow_token,
+                    "flow_action": "navigate",
+                    "flow_action_payload": {"screen": screen},
+                },
+            },
+        }
+        if footer:
+            interactive["footer"] = {"text": footer}
+        return await self._post({"messaging_product": "whatsapp", "to": to, "type": "interactive", "interactive": interactive})
+
     async def send_image(self, to: str, link: str, caption: str = "") -> dict:
         return await self._post(
             {"messaging_product": "whatsapp", "to": to, "type": "image", "image": {"link": link, "caption": caption}}
