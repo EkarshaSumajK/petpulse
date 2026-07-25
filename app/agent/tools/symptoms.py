@@ -30,6 +30,17 @@ HARMFUL_SUBSTANCES = [
     r"rat poison", r"pesticide", r"medication", r"pills?", r"human medicine",
 ]
 
+# Deterministic display string, independent of media source (text/photo/video/
+# audio) — kept out of the LLM's hands so the rating always reads the same
+# way instead of being reworded turn to turn.
+SEVERITY_EMOJI = {1: "🟢", 2: "🟢", 3: "🟡", 4: "🟠", 5: "🔴"}
+
+
+def _severity_display(severity: int, severity_label: str) -> str:
+    emoji = SEVERITY_EMOJI.get(severity, "🟡")
+    label = severity_label or "Assessment"
+    return f"{emoji} {label} ({severity}/5)"
+
 
 def _keyword_hit(patterns: list[str], text: str) -> list[str]:
     hits = []
@@ -93,6 +104,7 @@ async def check_symptoms(
     verdict = _apply_safety_override(symptoms, verdict)
 
     severity = verdict.get("severity", 3)
+    severity_display = _severity_display(severity, verdict.get("severity_label", ""))
     if pet.get("id"):
         ctx.supabase.table("health_logs").insert(
             {
@@ -109,6 +121,7 @@ async def check_symptoms(
         "success": True,
         "severity": severity,
         "severity_label": verdict.get("severity_label"),
+        "severity_display": severity_display,
         "requires_emergency_care": verdict.get("requires_emergency_care", False),
         "assessment_failed": assessment_failed,
         "red_flags": verdict.get("red_flags", []),

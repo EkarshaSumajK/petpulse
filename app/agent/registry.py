@@ -53,11 +53,17 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     _spec(
         "check_symptoms",
-        "Run a structured triage assessment on a NEW symptom the customer just described. Always call this "
-        "before giving your own clinical read on a new symptom.",
+        "Run a structured triage assessment (1-5 severity rating) on a NEW symptom or health concern — "
+        "whether the customer typed it, or you noticed it yourself in a photo, video, or voice note. Always "
+        "call this before giving your own clinical read, for any modality.",
         {
             "pet_id": _STR, "pet_name": _STR, "species": _STR,
-            "symptoms": {"type": "string", "description": "The symptoms as described by the customer."},
+            "symptoms": {
+                "type": "string",
+                "description": "The symptom description — as the customer typed it, or your own summary of "
+                "what you observed in an image/video/audio Media Context (e.g. 'visible limp on left hind leg' "
+                "or 'labored breathing and coughing audible in voice note').",
+            },
         },
         ["symptoms"],
         symptoms.check_symptoms,
