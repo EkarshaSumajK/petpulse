@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# Force stdout/stderr unbuffered so logs (and crash tracebacks) show up
+# immediately in PaaS log viewers instead of sitting in a pipe buffer.
+ENV PYTHONUNBUFFERED=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
