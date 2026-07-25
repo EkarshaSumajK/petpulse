@@ -17,6 +17,9 @@ COPY app ./app
 
 EXPOSE 8000
 
-# ${PORT} so this also runs unmodified on PaaS hosts (Render, Railway, Fly) that inject
-# their own port via env var; falls back to 8000 for local `docker run`.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Fixed port 8000 — this is what the currently-live Railway deploy's networking
+# is already pointed at. Do not switch back to a shell-expanded ${PORT} here
+# without also updating Railway's Settings > Networking target port to match,
+# or the proxy and the app end up listening on two different ports (silent
+# "connection refused" even though the container is healthy).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
