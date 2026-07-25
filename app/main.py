@@ -1,0 +1,116 @@
+"""FastAPI entrypoint — replaces the n8n webhook trigger + `Respond to
+Webhook` verify-challenge node (spec §2). One route receives every inbound
+WhatsApp event (customer or vet); everything else is delegated to
+ingestion/agent modules."""
+
+import hashlib
+import hmac
+import logging
+from contextlib import asynccontextmanager
+
+import httpx
+from fastapi import FastAPI, Request, Response
+
+from app.agent.orchestrator import run_agent_turn
+from app.config import get_settings
+from app.deps import AppContext
+from app.ingestion.context import build_context
+from app.ingestion.dedup import claim
+from app.ingestion.media import process_media
+from app.ingestion.webhook import extract_message, verify_webhook_challenge
+from app.integrations.openai_client import make_openai_client
+from app.integrations.supabase_client import make_supabase_client
+from app.integrations.whatsapp import WhatsAppClient
+from app.scheduler.runner import start_scheduler
+
+logging.basicConfig(level=get_settings().log_level)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    async with httpx.AsyncClient(timeout=30.0) as http_client:
+        ctx = AppContext(
+            settings=settings,
+            http=http_client,
+            whatsapp=WhatsAppClient(settings, http_client),
+            supabase=make_supabase_client(settings),
+            openai=make_openai_client(settings),
+        )
+        app.state.ctx = ctx
+        scheduler = start_scheduler(ctx)
+        try:
+            yield
+        finally:
+            scheduler.shutdown(wait=False)
+
+
+app = FastAPI(title="PetPulse Core Engine", lifespan=lifespan)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/webhook/petpulse-core")
+async def verify_webhook(request: Request) -> Response:
+    ctx: AppContext = request.app.state.ctx
+    params = request.query_params
+    challenge = verify_webhook_challenge(
+        params.get("hub.mode"),
+        params.get("hub.verify_token"),
+        params.get("hub.challenge"),
+        ctx.settings.whatsapp_verify_token,
+    )
+    if challenge is None:
+        return Response(status_code=403)
+    return Response(content=challenge, media_type="text/plain")
+
+
+def _valid_signature(settings, body: bytes, signature_header: str | None) -> bool:
+    if not settings.whatsapp_app_secret:
+        return True  # signature verification not configured — accept (matches n8n, which didn't check it either)
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    expected = hmac.new(settings.whatsapp_app_secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_header.removeprefix("sha256="))
+
+
+@app.post("/webhook/petpulse-core")
+async def receive_webhook(request: Request) -> Response:
+    ctx: AppContext = request.app.state.ctx
+    raw_body = await request.body()
+
+    if not _valid_signature(ctx.settings, raw_body, request.headers.get("x-hub-signature-256")):
+        return Response(status_code=403)
+
+    body = await request.json()
+    extracted = extract_message(body)
+    if extracted is None or not extracted.is_valid():
+        return Response(status_code=200)  # non-message webhook event (status update, etc.) — ack and ignore
+
+    if not claim(ctx.supabase, extracted.message_id):
+        return Response(status_code=200)  # duplicate delivery, already processed
+
+    try:
+        agent_ctx = await build_context(ctx.supabase, extracted)
+
+        media_context = ""
+        document_filing_status = ""
+        if any([extracted.image_media_id, extracted.audio_media_id, extracted.document_media_id, extracted.video_media_id]):
+            media_result = await process_media(ctx, extracted, agent_ctx.pets)
+            agent_ctx.pending_media = media_result
+            media_context = media_result.media_context
+            if media_result.document_classification:
+                document_filing_status = (
+                    f"attempted; detected_type={media_result.document_classification.document_type}, "
+                    f"is_medical={media_result.document_classification.is_medical_document}"
+                )
+
+        await run_agent_turn(ctx, agent_ctx, extracted, media_context, document_filing_status)
+    except Exception:
+        logger.exception("Failed to process inbound message %s", extracted.message_id)
+
+    return Response(status_code=200)

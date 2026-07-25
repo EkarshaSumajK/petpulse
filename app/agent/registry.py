@@ -1,0 +1,245 @@
+"""Single tool registry for the one PetPulse agent, role-filtered. This
+replaces n8n's `Is Doctor?` hard branch (customer tools vs. an entirely
+separate vet code path) with one registry where tool *availability* is
+gated by `profiles.role`, but the decision of which tool to call is always
+made by the same LLM loop."""
+
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from app.agent.tools import booking, documents, onboarding, pet_members, pet_parent_guide, symptoms, vets
+
+
+@dataclass
+class ToolSpec:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    fn: Callable
+    roles: set[str]
+
+
+def _spec(name: str, description: str, properties: dict[str, Any], required: list[str], fn: Callable, roles: set[str]) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        description=description,
+        parameters={"type": "object", "properties": properties, "required": required},
+        fn=fn,
+        roles=roles,
+    )
+
+
+CUSTOMER = {"customer"}
+VET = {"vet"}
+BOTH = {"customer", "vet"}
+
+_STR = {"type": "string"}
+_NUM_OR_NULL = {"type": ["number", "null"]}
+
+TOOL_SPECS: list[ToolSpec] = [
+    _spec(
+        "save_onboarding_field",
+        "Save or update one piece of profile/pet information the customer just gave you (email, city, "
+        "pet name, species, breed, age, dob, weight). Call once per field; call multiple times per turn if "
+        "several fields were mentioned.",
+        {
+            "field": {"type": "string", "description": "email|city|pet_name|species|breed|age|dob|weight"},
+            "value": _STR,
+            "pet_name": {"type": "string", "description": "Which pet this is for, if the account has more than one."},
+        },
+        ["field", "value"],
+        onboarding.save_onboarding_field,
+        CUSTOMER,
+    ),
+    _spec(
+        "check_symptoms",
+        "Run a structured triage assessment on a NEW symptom the customer just described. Always call this "
+        "before giving your own clinical read on a new symptom.",
+        {
+            "pet_id": _STR, "pet_name": _STR, "species": _STR,
+            "symptoms": {"type": "string", "description": "The symptoms as described by the customer."},
+        },
+        ["symptoms"],
+        symptoms.check_symptoms,
+        CUSTOMER,
+    ),
+    _spec(
+        "find_nearby_vets",
+        "Find nearby vet clinics. Use shared location-pin coordinates if available in context, else pass "
+        "location_text from what the customer said.",
+        {"location_text": _STR, "latitude": _NUM_OR_NULL, "longitude": _NUM_OR_NULL},
+        [],
+        vets.find_nearby_vets,
+        CUSTOMER,
+    ),
+    _spec(
+        "send_pet_document",
+        "Send previously-filed documents for a pet back to the customer over WhatsApp.",
+        {"pet_id": _STR, "pet_name": _STR, "document_type": {"type": "string", "description": "Optional filter, e.g. 'vaccination'."}},
+        [],
+        documents.send_pet_document,
+        CUSTOMER,
+    ),
+    _spec(
+        "get_pet_passport",
+        "Build and return a full health-passport summary for a pet (vaccinations, recent records).",
+        {"pet_id": _STR, "pet_name": _STR},
+        [],
+        documents.get_pet_passport,
+        CUSTOMER,
+    ),
+    _spec(
+        "file_document",
+        "File the image/document from THIS turn into the pet's medical record. Call this when the system "
+        "prompt's document-filing rule applies to what was just uploaded.",
+        {"pet_name": _STR, "document_type": {"type": "string", "description": "Override the auto-detected type if the customer's own caption says otherwise."}},
+        [],
+        documents.file_document,
+        BOTH,
+    ),
+    _spec(
+        "start_new_pet_parent_guide",
+        "Start the new-pet-parent onboarding guide (life-stage-specific welcome messages).",
+        {"pet_id": _STR, "species": _STR, "pet_name": _STR, "age": _STR, "breed": _STR, "extra_context": _STR},
+        [],
+        pet_parent_guide.start_new_pet_parent_guide,
+        CUSTOMER,
+    ),
+    _spec(
+        "add_pet_member",
+        "Add another person (family/caregiver/co-owner) to a pet's care team so they also get updates.",
+        {
+            "pet_id": _STR, "pet_name": _STR, "member_name": _STR,
+            "member_phone": {"type": "string", "description": "With country code."},
+            "role": {"type": "string", "description": "owner|family|caregiver"},
+        },
+        ["member_name", "member_phone"],
+        pet_members.add_pet_member,
+        CUSTOMER,
+    ),
+    _spec(
+        "request_doctor_session",
+        "Send the customer a catalogue of available vets to book a consultation. Requires pet name, "
+        "species, breed, age, and email already on file. Write case_summary yourself.",
+        {
+            "pet_id": _STR, "pet_name": _STR,
+            "case_summary": {"type": "string", "description": "2-4 sentence vet-tech-handoff summary."},
+            "preferred_time": {"type": "string", "description": "ISO 8601 with +05:30 offset, if the customer stated one."},
+        },
+        ["case_summary"],
+        booking.request_doctor_session,
+        CUSTOMER,
+    ),
+    _spec(
+        "select_doctor",
+        "Customer picked a specific vet from the catalogue — compute and send that vet's open slots.",
+        {"session_id": _STR, "doctor_phone": _STR},
+        ["session_id", "doctor_phone"],
+        booking.select_doctor,
+        CUSTOMER,
+    ),
+    _spec(
+        "book_slot",
+        "Customer picked a specific time slot — finalize the booking (with a fresh double-booking check).",
+        {"session_id": _STR, "slot_start": {"type": "string", "description": "ISO 8601 timestamp."}, "doctor_phone": _STR},
+        ["session_id", "slot_start"],
+        booking.book_slot,
+        CUSTOMER,
+    ),
+    _spec(
+        "propose_time",
+        "Propose an alternate time for a session, to the other party.",
+        {
+            "session_id": _STR,
+            "proposed_time": {"type": "string", "description": "ISO 8601 timestamp."},
+            "proposed_by": {"type": "string", "description": "'customer' or 'vet' — whichever role you are talking to right now."},
+        },
+        ["session_id", "proposed_time", "proposed_by"],
+        booking.propose_time,
+        BOTH,
+    ),
+    _spec(
+        "respond_to_time_proposal",
+        "Respond to a time the other party proposed for a session.",
+        {"session_id": _STR, "decision": {"type": "string", "description": "accept|decline|retime"}},
+        ["session_id", "decision"],
+        booking.respond_to_time_proposal,
+        BOTH,
+    ),
+    _spec(
+        "accept_session",
+        "Vet accepts a pending session request at its currently proposed time.",
+        {"session_id": _STR},
+        ["session_id"],
+        booking.accept_session,
+        VET,
+    ),
+    _spec(
+        "decline_session",
+        "Vet declines a pending session request.",
+        {"session_id": _STR},
+        ["session_id"],
+        booking.decline_session,
+        VET,
+    ),
+    _spec(
+        "cancel_session",
+        "Cancel a booking session (either party).",
+        {"session_id": _STR},
+        ["session_id"],
+        booking.cancel_session,
+        BOTH,
+    ),
+    _spec(
+        "mark_session_done",
+        "Vet marks a session as completed, moving it into the prescription-collection step.",
+        {"session_id": _STR},
+        ["session_id"],
+        booking.mark_session_done,
+        VET,
+    ),
+    _spec(
+        "file_prescription",
+        "File the vet's prescription/treatment notes for a completed session and relay them to the customer.",
+        {"session_id": _STR, "medications": _STR, "treatment_plan": _STR},
+        ["session_id", "medications"],
+        booking.file_prescription,
+        VET,
+    ),
+    _spec(
+        "list_my_appointments",
+        "List the vet's upcoming accepted sessions.",
+        {},
+        [],
+        booking.list_my_appointments,
+        VET,
+    ),
+    _spec(
+        "relay_to_customer",
+        "Relay a vet's clinical note/reply to the customer on a specific session, close to verbatim.",
+        {"session_id": _STR, "message": _STR},
+        ["session_id", "message"],
+        booking.relay_to_customer,
+        VET,
+    ),
+]
+
+_BY_NAME = {spec.name: spec for spec in TOOL_SPECS}
+
+
+def get_tool_schemas(role: str) -> list[dict[str, Any]]:
+    return [
+        {"type": "function", "function": {"name": spec.name, "description": spec.description, "parameters": spec.parameters}}
+        for spec in TOOL_SPECS
+        if role in spec.roles
+    ]
+
+
+def get_tool_fn(name: str) -> Callable | None:
+    spec = _BY_NAME.get(name)
+    return spec.fn if spec else None
+
+
+def is_tool_allowed_for_role(name: str, role: str) -> bool:
+    spec = _BY_NAME.get(name)
+    return bool(spec and role in spec.roles)

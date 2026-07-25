@@ -1,0 +1,125 @@
+"""WhatsApp Cloud API (Meta Graph API) client — ports spec §6.
+
+All sends go through raw HTTP to the Graph API, matching how the live n8n
+system does the vast majority of its sends (the native n8n whatsApp node was
+just a thin wrapper over the same endpoint for plain text).
+"""
+
+import asyncio
+import base64
+import logging
+
+import httpx
+
+from app.config import Settings
+from app.utils.formatting import split_into_chunks, to_whatsapp_markdown
+
+logger = logging.getLogger(__name__)
+
+CHUNK_DELAY_SECONDS = 0.6
+
+
+class WhatsAppClient:
+    def __init__(self, settings: Settings, http: httpx.AsyncClient):
+        self._settings = settings
+        self._http = http
+        self._base = f"https://graph.facebook.com/{settings.whatsapp_api_version}/{settings.whatsapp_phone_number_id}"
+        self._headers = {"Authorization": f"Bearer {settings.whatsapp_access_token}"}
+
+    async def _post(self, payload: dict) -> dict:
+        resp = await self._http.post(f"{self._base}/messages", headers=self._headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def send_text(self, to: str, body: str) -> dict:
+        return await self._post({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": body}})
+
+    async def send_reply_and_chunk(self, to: str, text: str) -> None:
+        """Formats + chunks a long agent reply and sends each chunk with a
+        throttling delay, matching `Format WhatsApp Response` -> `Split
+        Response Into Chunks` -> `Chunk Send Loop` (spec §2/§6)."""
+        formatted = to_whatsapp_markdown(text)
+        chunks = split_into_chunks(formatted)
+        for i, chunk in enumerate(chunks):
+            await self.send_text(to, chunk)
+            if i < len(chunks) - 1:
+                await asyncio.sleep(CHUNK_DELAY_SECONDS)
+
+    async def send_interactive_list(
+        self,
+        to: str,
+        header: str,
+        body: str,
+        button_label: str,
+        sections: list[dict],
+    ) -> dict:
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "interactive",
+                "interactive": {
+                    "type": "list",
+                    "header": {"type": "text", "text": header},
+                    "body": {"text": body},
+                    "action": {"button": button_label, "sections": sections},
+                },
+            }
+        )
+
+    async def send_interactive_buttons(self, to: str, body: str, buttons: list[dict]) -> dict:
+        """`buttons`: list of {"id": ..., "title": ...}, max 3."""
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {"text": body},
+                    "action": {
+                        "buttons": [
+                            {"type": "reply", "reply": {"id": b["id"], "title": b["title"]}} for b in buttons[:3]
+                        ]
+                    },
+                },
+            }
+        )
+
+    async def send_image(self, to: str, link: str, caption: str = "") -> dict:
+        return await self._post(
+            {"messaging_product": "whatsapp", "to": to, "type": "image", "image": {"link": link, "caption": caption}}
+        )
+
+    async def send_document(self, to: str, link: str, filename: str, caption: str = "") -> dict:
+        return await self._post(
+            {
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "document",
+                "document": {"link": link, "filename": filename, "caption": caption},
+            }
+        )
+
+    async def get_media_url(self, media_id: str) -> str:
+        resp = await self._http.get(
+            f"https://graph.facebook.com/{self._settings.whatsapp_api_version}/{media_id}",
+            headers=self._headers,
+        )
+        resp.raise_for_status()
+        return resp.json()["url"]
+
+    async def download_media_base64(self, media_id: str) -> tuple[str, str]:
+        """Returns (base64_data, mime_type)."""
+        url = await self.get_media_url(media_id)
+        resp = await self._http.get(url, headers=self._headers)
+        resp.raise_for_status()
+        mime = resp.headers.get("content-type", "application/octet-stream")
+        return base64.b64encode(resp.content).decode(), mime
+
+    async def download_media_bytes(self, media_id: str) -> tuple[bytes, str]:
+        url = await self.get_media_url(media_id)
+        resp = await self._http.get(url, headers=self._headers)
+        resp.raise_for_status()
+        mime = resp.headers.get("content-type", "application/octet-stream")
+        return resp.content, mime
