@@ -28,6 +28,8 @@ class WhatsAppClient:
 
     async def _post(self, payload: dict) -> dict:
         resp = await self._http.post(f"{self._base}/messages", headers=self._headers, json=payload)
+        if resp.is_error:
+            logger.error("WhatsApp Graph API %s error for %s: %s", resp.status_code, payload.get("type"), resp.text)
         resp.raise_for_status()
         return resp.json()
 
