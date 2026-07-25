@@ -100,7 +100,7 @@ async def receive_webhook(request: Request) -> Response:
         media_context = ""
         document_filing_status = ""
         if any([extracted.image_media_id, extracted.audio_media_id, extracted.document_media_id, extracted.video_media_id]):
-            media_result = await process_media(ctx, extracted, agent_ctx.pets)
+            media_result = await process_media(ctx, extracted, agent_ctx.pets, agent_ctx.active_pet)
             agent_ctx.pending_media = media_result
             media_context = media_result.media_context
             if media_result.document_classification:

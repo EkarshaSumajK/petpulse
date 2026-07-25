@@ -58,7 +58,7 @@ async def test_video_download_failure_falls_back_instead_of_raising():
 async def test_video_success_path_still_returns_real_analysis(monkeypatch):
     ctx = _make_ctx(download_return=(b"real-video-bytes", "video/mp4"))
 
-    async def fake_analyze(openai_client, settings, data, caption):
+    async def fake_analyze(openai_client, settings, data, caption, pet_context=""):
         return "[Video frame analysis] Dog appears to be limping on its left hind leg."
 
     async def fake_classify(*args, **kwargs):

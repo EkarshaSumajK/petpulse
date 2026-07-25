@@ -24,6 +24,7 @@ from app.media_pipeline import document as document_pipeline
 from app.media_pipeline import image as image_pipeline
 from app.media_pipeline import video as video_pipeline
 from app.media_pipeline.classify import DocumentClassification, classify_document
+from app.media_pipeline.pet_context import build_pet_background_note
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,16 @@ class MediaResult:
     document_mime_type: str | None = None
 
 
-async def process_media(ctx: AppContext, extracted: ExtractedMessage, pets: list[dict]) -> MediaResult:
+async def process_media(
+    ctx: AppContext, extracted: ExtractedMessage, pets: list[dict], active_pet: dict | None = None
+) -> MediaResult:
+    pet_context = build_pet_background_note(active_pet)
+
     if extracted.image_media_id:
         try:
             data, mime = await ctx.whatsapp.download_media_bytes(extracted.image_media_id)
             analysis = await image_pipeline.analyze_image(
-                ctx.openai, ctx.settings, base64.b64encode(data).decode(), mime, extracted.text
+                ctx.openai, ctx.settings, base64.b64encode(data).decode(), mime, extracted.text, pet_context
             )
             classification = await classify_document(
                 ctx.openai, ctx.settings, "image", mime, analysis, extracted.text, pets
@@ -70,8 +75,8 @@ async def process_media(ctx: AppContext, extracted: ExtractedMessage, pets: list
     if extracted.audio_media_id:
         try:
             data, mime = await ctx.whatsapp.download_media_bytes(extracted.audio_media_id)
-            transcript = await audio_pipeline.analyze_voice_note(ctx.openai, data)
-            return MediaResult(media_context=f"[Voice note transcript] {transcript}")
+            transcript = await audio_pipeline.analyze_voice_note(ctx.openai, ctx.settings, data, pet_context)
+            return MediaResult(media_context=f"[Voice note analysis] {transcript}")
         except Exception:
             logger.exception("Audio processing failed for media %s", extracted.audio_media_id)
             return MediaResult(media_context=FALLBACK_MEDIA_CONTEXT["audio"])
@@ -97,7 +102,7 @@ async def process_media(ctx: AppContext, extracted: ExtractedMessage, pets: list
     if extracted.video_media_id:
         try:
             data, mime = await ctx.whatsapp.download_media_bytes(extracted.video_media_id)
-            analysis = await video_pipeline.analyze_video(ctx.openai, ctx.settings, data, extracted.text)
+            analysis = await video_pipeline.analyze_video(ctx.openai, ctx.settings, data, extracted.text, pet_context)
             classification = await classify_document(
                 ctx.openai, ctx.settings, "video", mime, analysis, extracted.text, pets
             )

@@ -37,6 +37,17 @@ def _extract_video_audio_sync(video_bytes: bytes) -> bytes | None:
         return audio_path.read_bytes()
 
 
+def _convert_audio_to_mp3_sync(audio_bytes: bytes) -> bytes:
+    """WhatsApp voice notes arrive as OGG/Opus — gpt-audio's input_audio
+    format only documents wav/mp3 support, so convert rather than guess."""
+    with tempfile.TemporaryDirectory() as tmp:
+        input_path = Path(tmp) / "input.ogg"
+        output_path = Path(tmp) / "output.mp3"
+        input_path.write_bytes(audio_bytes)
+        _run_ffmpeg(["-i", str(input_path), "-acodec", "libmp3lame", str(output_path)])
+        return output_path.read_bytes()
+
+
 def _render_pdf_first_page_sync(pdf_bytes: bytes) -> bytes:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
@@ -57,3 +68,7 @@ async def extract_video_audio(video_bytes: bytes) -> bytes | None:
 
 async def render_pdf_first_page(pdf_bytes: bytes) -> bytes:
     return await asyncio.to_thread(_render_pdf_first_page_sync, pdf_bytes)
+
+
+async def convert_audio_to_mp3(audio_bytes: bytes) -> bytes:
+    return await asyncio.to_thread(_convert_audio_to_mp3_sync, audio_bytes)
