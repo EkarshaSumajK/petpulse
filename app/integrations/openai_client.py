@@ -25,7 +25,7 @@ async def chat_with_tools(
         messages=messages,
         tools=tools,
         tool_choice="auto",
-        max_tokens=settings.openai_agent_max_tokens,
+        max_completion_tokens=settings.openai_agent_max_tokens,
         reasoning_effort="medium",
     )
 
