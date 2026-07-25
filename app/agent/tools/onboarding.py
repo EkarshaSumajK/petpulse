@@ -80,6 +80,7 @@ async def save_onboarding_field(
         resolution = resolve_pet(agent_ctx.pets, pet_name=pet_name, auto_resolve_single=False)
         if resolution.pet:
             client.table("pets").update({"name": normalized}).eq("id", resolution.pet["id"]).execute()
+            resolution.pet["name"] = normalized  # keep agent_ctx.pets in sync for later calls this same turn
             return {"success": True, "field": field, "savedValue": normalized}
         created = (
             client.table("pets")
@@ -90,6 +91,11 @@ async def save_onboarding_field(
         client.table("pet_members").insert(
             {"pet_id": pet["id"], "profile_id": agent_ctx.profile["id"], "role": "owner", "is_primary": True, "added_by": agent_ctx.profile["id"]}
         ).execute()
+        # Registering a pet is typically several save_onboarding_field calls in ONE turn
+        # (name, then species/breed/age as the owner mentions them) — agent_ctx.pets was
+        # loaded once at turn start, so without this, every call after this one can't find
+        # the pet it just created and silently fails with no_pet_on_file.
+        agent_ctx.pets.append(pet)
         return {"success": True, "field": field, "savedValue": normalized, "created_pet": True}
 
     resolution = resolve_pet(agent_ctx.pets, pet_name=pet_name, auto_resolve_single=True)
@@ -99,4 +105,5 @@ async def save_onboarding_field(
         return {"success": False, "field": field, "error": "no_pet_on_file"}
 
     client.table("pets").update({column: normalized}).eq("id", resolution.pet["id"]).execute()
+    resolution.pet[column] = normalized
     return {"success": True, "field": field, "savedValue": normalized}

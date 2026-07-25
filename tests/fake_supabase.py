@@ -1,0 +1,117 @@
+"""Minimal in-memory fake of the supabase-py query builder — enough to
+exercise real tool logic (filtering, insert, update) against an in-memory
+table dict, instead of mocking the tool function itself away. Only
+supports the subset of the query builder this codebase actually uses."""
+
+import uuid
+from typing import Any
+
+
+class _FakeResult:
+    def __init__(self, data: list[dict[str, Any]]):
+        self.data = data
+
+
+class _FakeQuery:
+    def __init__(self, store: dict[str, list[dict[str, Any]]], table_name: str):
+        self._store = store
+        self._table_name = table_name
+        self._filters: list[tuple[str, str, Any]] = []
+        self._op: str | None = None
+        self._payload: Any = None
+        self._limit: int | None = None
+
+    def select(self, *_args, **_kwargs):
+        self._op = self._op or "select"
+        return self
+
+    def insert(self, payload):
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def update(self, payload):
+        self._op = "update"
+        self._payload = payload
+        return self
+
+    def eq(self, col, val):
+        self._filters.append((col, "eq", val))
+        return self
+
+    def neq(self, col, val):
+        self._filters.append((col, "neq", val))
+        return self
+
+    def gte(self, col, val):
+        self._filters.append((col, "gte", val))
+        return self
+
+    def in_(self, col, vals):
+        self._filters.append((col, "in", vals))
+        return self
+
+    def ilike(self, col, pattern):
+        self._filters.append((col, "ilike", pattern))
+        return self
+
+    def order(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    def _matches(self, row: dict[str, Any]) -> bool:
+        for col, op, val in self._filters:
+            row_val = row.get(col)
+            if op == "eq" and row_val != val:
+                return False
+            if op == "neq" and row_val == val:
+                return False
+            if op == "gte" and (row_val is None or row_val < val):
+                return False
+            if op == "in" and row_val not in val:
+                return False
+            if op == "ilike":
+                needle = val.strip("%").lower()
+                if not row_val or needle not in str(row_val).lower():
+                    return False
+        return True
+
+    def execute(self):
+        table = self._store.setdefault(self._table_name, [])
+
+        if self._op == "insert":
+            payloads = self._payload if isinstance(self._payload, list) else [self._payload]
+            inserted = []
+            for payload in payloads:
+                row = {"id": str(uuid.uuid4()), **payload}
+                table.append(row)
+                inserted.append(row)
+            return _FakeResult(inserted)
+
+        if self._op == "update":
+            updated = []
+            for row in table:
+                if self._matches(row):
+                    row.update(self._payload)
+                    updated.append(row)
+            return _FakeResult(updated)
+
+        # select
+        matched = [row for row in table if self._matches(row)]
+        if self._limit is not None:
+            matched = matched[: self._limit]
+        return _FakeResult(matched)
+
+
+class FakeSupabaseClient:
+    def __init__(self, initial: dict[str, list[dict[str, Any]]] | None = None):
+        self._store: dict[str, list[dict[str, Any]]] = {k: list(v) for k, v in (initial or {}).items()}
+
+    def table(self, name: str) -> _FakeQuery:
+        return _FakeQuery(self._store, name)
+
+    def rows(self, table_name: str) -> list[dict[str, Any]]:
+        return self._store.setdefault(table_name, [])

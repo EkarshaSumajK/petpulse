@@ -44,6 +44,48 @@ def _get_pet(client, pet_id: str) -> dict[str, Any] | None:
     return resp.data[0] if resp.data else None
 
 
+def _normalize_to_ist(time_str: str) -> str | None:
+    """Every write of a customer/vet-supplied time string must go through
+    this — an LLM-emitted ISO timestamp with no offset is ambiguous, and
+    Postgres/PostgREST will store it as UTC, landing real bookings 5.5
+    hours off from what both parties were told over WhatsApp."""
+    if not time_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(time_str)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=IST)
+    return dt.isoformat()
+
+
+async def _send_doctor_catalogue(ctx: AppContext, session_id: str, phone: str) -> bool:
+    client = ctx.supabase
+    doctors = client.table("profiles").select("*").eq("role", "vet").limit(MAX_DOCTORS_LISTED).execute().data or []
+    if not doctors:
+        return False
+
+    rows = [
+        {
+            "id": f"choose_doctor|{session_id}|{doc['phone_number']}",
+            "title": (doc.get("full_name") or "Vet")[:24],
+            "description": f"{doc.get('experience_years', '?')}y exp • {doc.get('specialization', 'General')}"[:72],
+        }
+        for doc in doctors
+    ]
+    rows.append({"id": f"cancel_booking|{session_id}", "title": "Cancel", "description": "Don't book right now"})
+
+    await ctx.whatsapp.send_interactive_list(
+        phone,
+        header="Choose a Vet",
+        body="Here are our available vets. Pick one to see their open slots:",
+        button_label="View Vets",
+        sections=[{"title": "Available Vets", "rows": rows}],
+    )
+    return True
+
+
 async def request_doctor_session(
     ctx: AppContext,
     agent_ctx: AgentContext,
@@ -58,58 +100,64 @@ async def request_doctor_session(
 
     client = ctx.supabase
     profile_id = agent_ctx.profile["id"]
+    phone = agent_ctx.profile["phone_number"]
 
-    existing = (
+    # Resolve the pet by id/name like every other tool does — previously this was
+    # never resolved at all, so every session got created with pet_id=NULL unless
+    # the caller happened to already have the exact pet_id in hand.
+    resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
+    if resolution.ambiguous:
+        names = ", ".join(p.get("name", "?") for p in agent_ctx.pets)
+        return {"success": False, "error": "ambiguous_pet", "message": f"Which pet is this for? On file: {names}"}
+    resolved_pet_id = resolution.pet["id"] if resolution.pet else None
+
+    # Scoped by pet, not just by account — a pending vet-choice request for one pet
+    # must not block starting a fresh one for a DIFFERENT pet on the same account.
+    existing_query = (
         client.table("doctor_sessions")
         .select("*")
         .eq("profile_id", profile_id)
         .eq("doctor_phone", "pending_doctor_choice")
         .eq("status", "pending")
-        .limit(1)
-        .execute()
-        .data
     )
-    if existing:
-        return {"success": True, "mode": "reminded_existing_list", "message": "You already have a vet list open — please pick a vet from it, or say 'cancel' to start over."}
+    if resolved_pet_id:
+        existing_query = existing_query.eq("pet_id", resolved_pet_id)
+    existing = existing_query.limit(1).execute().data
 
-    doctors = client.table("profiles").select("*").eq("role", "vet").limit(MAX_DOCTORS_LISTED).execute().data or []
-    if not doctors:
-        return {"success": False, "error": "no_doctors_available", "message": "No vets are available to book right now."}
+    if existing:
+        session_id = existing[0]["id"]
+        # Resend the actual list instead of telling the customer to go find an old
+        # message — much less friction, and gives them a working "Cancel" row too.
+        sent = await _send_doctor_catalogue(ctx, session_id, phone)
+        if not sent:
+            return {"success": False, "error": "no_doctors_available", "message": "No vets are available to book right now."}
+        return {
+            "success": True,
+            "mode": "doctor_catalogue_sent",
+            "session_id": session_id,
+            "instruction_to_llm": "A vet list was already open for this pet — it has just been resent. Reply with an empty string.",
+        }
 
     session_row = (
         client.table("doctor_sessions")
         .insert(
             {
                 "profile_id": profile_id,
-                "pet_id": pet_id or None,
+                "pet_id": resolved_pet_id,
                 "doctor_phone": "pending_doctor_choice",
                 "status": "pending",
                 "awaiting_from": "doctor_choice",
                 "case_summary": case_summary,
-                "preferred_time": preferred_time or None,
+                "preferred_time": _normalize_to_ist(preferred_time),
             }
         )
         .execute()
         .data[0]
     )
 
-    rows = [
-        {
-            "id": f"choose_doctor|{session_row['id']}|{doc['phone_number']}",
-            "title": (doc.get("full_name") or "Vet")[:24],
-            "description": f"{doc.get('experience_years', '?')}y exp • {doc.get('specialization', 'General')}"[:72],
-        }
-        for doc in doctors
-    ]
-    rows.append({"id": f"cancel_booking|{session_row['id']}", "title": "Cancel", "description": "Don't book right now"})
-
-    await ctx.whatsapp.send_interactive_list(
-        agent_ctx.profile["phone_number"],
-        header="Choose a Vet",
-        body="Here are our available vets. Pick one to see their open slots:",
-        button_label="View Vets",
-        sections=[{"title": "Available Vets", "rows": rows}],
-    )
+    sent = await _send_doctor_catalogue(ctx, session_row["id"], phone)
+    if not sent:
+        return {"success": False, "error": "no_doctors_available", "message": "No vets are available to book right now."}
 
     return {"success": True, "mode": "doctor_catalogue_sent", "session_id": session_row["id"]}
 
@@ -226,12 +274,16 @@ async def propose_time(
     if not session:
         return {"success": False, "error": "session_not_found"}
 
+    normalized_time = _normalize_to_ist(proposed_time)
+    if not normalized_time:
+        return {"success": False, "error": "invalid_time", "message": "Couldn't understand that time — ask for a specific date and time."}
+
     awaiting_from = "doctor_time_input" if proposed_by == "customer" else "customer_time_input"
     client.table("doctor_sessions").update(
-        {"status": "negotiating", "awaiting_from": awaiting_from, "preferred_time": proposed_time}
+        {"status": "negotiating", "awaiting_from": awaiting_from, "preferred_time": normalized_time}
     ).eq("id", session_id).execute()
 
-    start = datetime.fromisoformat(proposed_time)
+    start = datetime.fromisoformat(normalized_time)
     when_text = start.strftime("%a %d %b, %I:%M %p IST")
 
     customer_profile = _get_profile(client, session["profile_id"])
