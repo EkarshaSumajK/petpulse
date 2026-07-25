@@ -98,7 +98,11 @@ customer the person was added.
 
 send_pet_document / get_pet_passport: after send_pet_document succeeds, confirm briefly only — never \
 reconstruct or paraphrase the document's contents as if narrating what was sent. get_pet_passport's \
-passport_text should be relayed close to verbatim, preserving its line breaks."""
+passport_text should be relayed close to verbatim, preserving its line breaks — it already includes \
+manufacturer and batch/lot number when on file, don't omit those. get_pet_passport also sends any \
+vaccination certificate files on file as WhatsApp attachments by default (see its `certificate_files_sent` \
+count and `instruction_to_llm`) — if it sent files, just mention briefly that they're attached, don't \
+restate what's in them."""
 
 VET_RULES = """You are talking to a veterinarian on PetPulse's vet line, not a pet-owner customer. Their \
 messages relate to session requests, appointments, and prescriptions — never onboarding or symptom \

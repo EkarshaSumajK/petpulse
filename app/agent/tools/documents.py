@@ -35,6 +35,38 @@ If next_due_date isn't stated, infer it from standard intervals (puppy/kitten: 3
 and mark next_due_source="inferred". Omit vaccination rows missing vaccine_name or date_administered."""
 
 
+def _format_vaccination_line(vax: dict[str, Any], today: str) -> tuple[str, bool]:
+    """Returns (display line, is_overdue). Pure/testable: includes every
+    field that's actually on file (manufacturer, batch/lot number, next-due
+    date) rather than just name + date, since those are on the record and
+    the owner may need them (e.g. for a boarding kennel or travel)."""
+    overdue = bool(vax.get("next_due_date") and vax["next_due_date"] < today)
+    flag = " (OVERDUE)" if overdue else ""
+    detail = f"- {vax['vaccine_name']} — {vax['date_administered']}"
+    if vax.get("manufacturer"):
+        detail += f" | {vax['manufacturer']}"
+    if vax.get("batch_number"):
+        detail += f" | Batch/Lot: {vax['batch_number']}"
+    if vax.get("next_due_date"):
+        detail += f" | Next due: {vax['next_due_date']}"
+    return f"{detail}{flag}", overdue
+
+
+async def _send_document_files(ctx: AppContext, phone: str, docs: list[dict[str, Any]], pet_name: str) -> int:
+    """Signs + sends each document's storage file as a WhatsApp attachment.
+    Shared by send_pet_document and get_pet_passport so the passport can
+    hand over the actual certificate files, not just a text summary."""
+    for doc in docs:
+        bucket, _, object_path = doc["storage_path"].partition("/")
+        signed_url = sign_storage_url(ctx.supabase, bucket, object_path)
+        caption = f"{doc['document_type']} for {pet_name}"
+        if (doc.get("mime_type") or "").startswith("image/"):
+            await ctx.whatsapp.send_image(phone, signed_url, caption)
+        else:
+            await ctx.whatsapp.send_document(phone, signed_url, doc["document_name"], caption)
+    return len(docs)
+
+
 async def send_pet_document(
     ctx: AppContext, agent_ctx: AgentContext, pet_id: str = "", pet_name: str = "", document_type: str = ""
 ) -> dict[str, Any]:
@@ -53,24 +85,19 @@ async def send_pet_document(
         return {"success": True, "mode": "no_documents", "message": "No matching documents on file for this pet."}
 
     phone = agent_ctx.profile["phone_number"]
-    for doc in docs:
-        bucket, _, object_path = doc["storage_path"].partition("/")
-        signed_url = sign_storage_url(ctx.supabase, bucket, object_path)
-        caption = f"{doc['document_type']} for {resolution.pet['name']}"
-        if (doc.get("mime_type") or "").startswith("image/"):
-            await ctx.whatsapp.send_image(phone, signed_url, caption)
-        else:
-            await ctx.whatsapp.send_document(phone, signed_url, doc["document_name"], caption)
+    count = await _send_document_files(ctx, phone, docs, resolution.pet["name"])
 
     return {
         "success": True,
         "mode": "documents_sent",
-        "count": len(docs),
+        "count": count,
         "instruction_to_llm": "Documents were already sent as WhatsApp attachments. Confirm briefly — do NOT restate or summarise their contents.",
     }
 
 
-async def get_pet_passport(ctx: AppContext, agent_ctx: AgentContext, pet_id: str = "", pet_name: str = "") -> dict[str, Any]:
+async def get_pet_passport(
+    ctx: AppContext, agent_ctx: AgentContext, pet_id: str = "", pet_name: str = "", send_certificates: bool = True
+) -> dict[str, Any]:
     resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
     if resolution.ambiguous:
         return {"success": False, "error": "ambiguous_pet", "message": "Which pet's passport?"}
@@ -101,11 +128,10 @@ async def get_pet_passport(ctx: AppContext, agent_ctx: AgentContext, pet_id: str
     overdue_count = 0
     lines.append("\n*Vaccinations:*")
     for vax in vaccinations:
-        overdue = vax.get("next_due_date") and vax["next_due_date"] < today
+        line, overdue = _format_vaccination_line(vax, today)
         if overdue:
             overdue_count += 1
-        flag = " (OVERDUE)" if overdue else ""
-        lines.append(f"- {vax['vaccine_name']} — {vax['date_administered']}{flag}")
+        lines.append(line)
 
     lines.append("\n*Recent medical records:*")
     for rec in medical_records:
@@ -116,12 +142,31 @@ async def get_pet_passport(ctx: AppContext, agent_ctx: AgentContext, pet_id: str
         lines.append(f"...and {older} older")
 
     passport_text = "\n".join(lines)
+
+    files_sent = 0
+    if send_certificates:
+        cert_docs = (
+            ctx.supabase.table("documents").select("*").eq("pet_id", pet["id"])
+            .ilike("document_type", "%Vaccination Certificate%")
+            .order("uploaded_at", desc=True).limit(5).execute().data or []
+        )
+        if cert_docs:
+            files_sent = await _send_document_files(ctx, agent_ctx.profile["phone_number"], cert_docs, pet["name"])
+
+    instruction = "Relay passport_text verbatim, preserving line breaks. This is ground truth — never contradict it."
+    if files_sent:
+        instruction += (
+            f" {files_sent} vaccination certificate file(s) on file were also just sent as WhatsApp attachments — "
+            "mention briefly that you've attached them, don't restate their contents."
+        )
+
     return {
         "success": True,
         "mode": "passport",
         "passport_text": passport_text,
         "overdue_vaccinations": overdue_count,
-        "instruction_to_llm": "Relay passport_text verbatim, preserving line breaks. This is ground truth — never contradict it.",
+        "certificate_files_sent": files_sent,
+        "instruction_to_llm": instruction,
     }
 
 

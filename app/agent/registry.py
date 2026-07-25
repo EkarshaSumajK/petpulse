@@ -88,8 +88,16 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     _spec(
         "get_pet_passport",
-        "Build and return a full health-passport summary for a pet (vaccinations, recent records).",
-        {"pet_id": _STR, "pet_name": _STR},
+        "Build and return a full health-passport summary for a pet (vaccinations incl. manufacturer/batch-lot "
+        "number/next-due date, recent records). Also sends any vaccination certificate files on file as WhatsApp "
+        "attachments by default.",
+        {
+            "pet_id": _STR, "pet_name": _STR,
+            "send_certificates": {
+                "type": "boolean",
+                "description": "Set false only if the customer explicitly asked for just the summary, not the files.",
+            },
+        },
         [],
         documents.get_pet_passport,
         CUSTOMER,
