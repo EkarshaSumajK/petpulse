@@ -37,6 +37,30 @@ uvicorn app.main:app --reload
 `ffmpeg` must be on the host for video-frame/audio extraction — already installed in the provided
 Dockerfile; install separately (`brew install ffmpeg` / `apt-get install ffmpeg`) for local runs.
 
+## Deployment
+
+**Not Vercel** — this app has an in-process APScheduler for the 3 cron jobs, shells out to `ffmpeg` for
+video processing, and the agent's tool-calling loop can run several sequential OpenAI calls in one
+request. None of that fits Vercel's stateless/serverless Python functions (no persistent background
+scheduler, no `ffmpeg` in the runtime, and function timeouts). It needs a normal long-running host — the
+existing `Dockerfile` runs as-is on any of them.
+
+**Render** (`render.yaml` included, Docker-native):
+1. New Web Service → connect this repo → Render detects `render.yaml` automatically.
+2. Dashboard → Environment → fill in every var marked `sync: false` (tokens/keys) — same table as above.
+3. Dashboard → Secret Files → add `google-service-account.json` with the service-account JSON content;
+   Render mounts it at `/etc/secrets/google-service-account.json`, which is what `GOOGLE_SERVICE_ACCOUNT_FILE`
+   in `render.yaml` already points at.
+4. Deploy, then register `https://<your-render-url>/webhook/petpulse-core` with Meta (see below).
+
+**Railway / Fly.io / a plain VM** — same `Dockerfile`, no `render.yaml` needed:
+- Railway: "Deploy from repo", it auto-detects the Dockerfile; add env vars in its dashboard, and use a
+  Railway **volume** (or a base64-encoded env var decoded on startup) for the Google credentials file.
+- Fly.io: `fly launch` picks up the Dockerfile; use `fly secrets set` for the tokens/keys and `fly volumes`
+  (or `fly secrets` decoded to a file at boot) for the Google credentials file.
+- Plain VM: `docker build` + `docker run --env-file .env -v ./credentials:/app/credentials` exactly as in
+  Setup above, behind whatever reverse proxy/TLS termination you're already using.
+
 ## Registering the webhook with Meta
 
 Point Meta's WhatsApp webhook config at `https://<your-host>/webhook/petpulse-core`, verify token =
