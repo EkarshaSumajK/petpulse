@@ -52,6 +52,13 @@ def get_or_create_profile(client: Client, phone_number: str, sender_name: str) -
     return resp.data[0]
 
 
+def is_unique_violation(exc: Exception) -> bool:
+    """postgrest raises a generic APIError on any DB error — this is the
+    only way to distinguish a real unique-constraint conflict (23505) from
+    every other failure mode, which must still propagate."""
+    return "23505" in str(exc) or "duplicate key" in str(exc).lower()
+
+
 def claim_message_id(client: Client, message_id: str) -> bool:
     """Dedup: attempt to INSERT into `processed_messages` (PK=message_id).
     Returns False (already processed) on a unique-violation, True on a
@@ -59,8 +66,8 @@ def claim_message_id(client: Client, message_id: str) -> bool:
     try:
         client.table("processed_messages").insert({"message_id": message_id}).execute()
         return True
-    except Exception as exc:  # postgrest raises on unique-violation (23505)
-        if "23505" in str(exc) or "duplicate key" in str(exc).lower():
+    except Exception as exc:
+        if is_unique_violation(exc):
             return False
         raise
 

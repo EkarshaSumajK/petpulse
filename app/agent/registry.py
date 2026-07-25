@@ -40,10 +40,12 @@ TOOL_SPECS: list[ToolSpec] = [
     _spec(
         "save_onboarding_field",
         "Save or update one piece of profile/pet information the customer just gave you (email, city, "
-        "pet name, species, breed, age, dob, weight). Call once per field; call multiple times per turn if "
-        "several fields were mentioned.",
+        "pet name, species, breed, age, dob, weight, gender). Call once per field; call multiple times in "
+        "the SAME turn whenever several fields were mentioned in one message — e.g. \"my dog Max is a 2yo "
+        "Labrador\" is 3 separate calls (pet_name=Max, species=Dog, breed=Labrador, age=2), all before you "
+        "reply, not spread across several turns.",
         {
-            "field": {"type": "string", "description": "email|city|pet_name|species|breed|age|dob|weight"},
+            "field": {"type": "string", "description": "email|city|pet_name|species|breed|age|dob|weight|gender"},
             "value": _STR,
             "pet_name": {"type": "string", "description": "Which pet this is for, if the account has more than one."},
         },

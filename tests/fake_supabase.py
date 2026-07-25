@@ -7,6 +7,11 @@ import uuid
 from typing import Any
 
 
+class FakeUniqueViolation(Exception):
+    def __str__(self):
+        return "duplicate key value violates unique constraint (23505)"
+
+
 class _FakeResult:
     def __init__(self, data: list[dict[str, Any]]):
         self.data = data
@@ -83,6 +88,8 @@ class _FakeQuery:
         table = self._store.setdefault(self._table_name, [])
 
         if self._op == "insert":
+            if self._table_name in self._store.get("__force_conflict__", set()):
+                raise FakeUniqueViolation()
             payloads = self._payload if isinstance(self._payload, list) else [self._payload]
             inserted = []
             for payload in payloads:
@@ -115,3 +122,9 @@ class FakeSupabaseClient:
 
     def rows(self, table_name: str) -> list[dict[str, Any]]:
         return self._store.setdefault(table_name, [])
+
+    def force_conflict_on_insert(self, table_name: str) -> None:
+        """Simulates a DB trigger/constraint that makes any insert into this
+        table raise a unique-violation — e.g. the real pet_members trigger
+        that auto-creates the owner row before our own code's insert runs."""
+        self._store.setdefault("__force_conflict__", set()).add(table_name)

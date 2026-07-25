@@ -67,3 +67,34 @@ async def test_renaming_existing_pet_updates_agent_ctx_pets_in_place_too():
 
     assert result["success"] is True
     assert agent_ctx.pets[0]["breed"] == "Beagle"
+
+
+@pytest.mark.asyncio
+async def test_new_pet_creation_survives_a_db_trigger_already_creating_pet_members():
+    """Reproduces a real bug found in live testing: this Supabase project has
+    a trigger that auto-creates the owner pet_members row when a pet is
+    inserted, so our own explicit insert always conflicted (23505) and
+    crashed the whole turn — every single new-pet registration failed."""
+    ctx = _make_ctx()
+    ctx.supabase.force_conflict_on_insert("pet_members")
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await save_onboarding_field(ctx, agent_ctx, field="pet_name", value="Bella")
+
+    assert result["success"] is True
+    assert result["created_pet"] is True
+    assert ctx.supabase.rows("pets")[0]["name"] == "Bella"
+
+
+@pytest.mark.asyncio
+async def test_gender_field_is_supported_and_normalized():
+    ctx = _make_ctx()
+    existing_pet = {"id": "pet-1", "name": "Bella", "species": "Cat"}
+    agent_ctx = _make_agent_ctx(pets=[existing_pet])
+    ctx.supabase._store["pets"] = [dict(existing_pet)]
+
+    result = await save_onboarding_field(ctx, agent_ctx, field="gender", value="female", pet_name="Bella")
+
+    assert result["success"] is True
+    assert result["savedValue"] == "Female"
+    assert agent_ctx.pets[0]["gender"] == "Female"

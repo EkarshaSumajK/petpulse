@@ -7,6 +7,7 @@ from typing import Any
 
 from app.deps import AppContext
 from app.ingestion.context import AgentContext
+from app.integrations.supabase_client import is_unique_violation
 from app.utils.pet_resolution import AMBIGUOUS_PET, resolve_pet
 
 SPECIES_SYNONYMS = {
@@ -22,10 +23,16 @@ SPECIES_SYNONYMS = {
 }
 CANONICAL_SPECIES = ["Dog", "Cat", "Rabbit", "Fish", "Bird", "Hamster", "Guinea Pig", "Turtle", "Cow", "Goat", "Other"]
 
+GENDER_SYNONYMS = {
+    "male": "Male", "m": "Male", "boy": "Male", "he": "Male", "him": "Male",
+    "female": "Female", "f": "Female", "girl": "Female", "she": "Female", "her": "Female",
+}
+
 PROFILE_FIELDS = {"email", "city", "full_name"}
 PET_FIELD_TO_COLUMN = {
     "name": "name", "pet_name": "name", "breed": "breed", "age": "age",
     "weight": "weight", "dob": "date_of_birth", "date_of_birth": "date_of_birth", "species": "species",
+    "gender": "gender",
 }
 
 
@@ -57,6 +64,8 @@ def _normalize_value(field: str, value: str) -> Any:
             return None
     if field == "species":
         return SPECIES_SYNONYMS.get(value.lower(), value.title() if value.title() in CANONICAL_SPECIES else "Other")
+    if field == "gender":
+        return GENDER_SYNONYMS.get(value.lower(), "Unknown")
     return re.sub(r"\s+", " ", value)
 
 
@@ -88,9 +97,17 @@ async def save_onboarding_field(
             .execute()
         )
         pet = created.data[0]
-        client.table("pet_members").insert(
-            {"pet_id": pet["id"], "profile_id": agent_ctx.profile["id"], "role": "owner", "is_primary": True, "added_by": agent_ctx.profile["id"]}
-        ).execute()
+        try:
+            client.table("pet_members").insert(
+                {"pet_id": pet["id"], "profile_id": agent_ctx.profile["id"], "role": "owner", "is_primary": True, "added_by": agent_ctx.profile["id"]}
+            ).execute()
+        except Exception as exc:
+            # A DB trigger on this project already auto-creates the owner pet_members
+            # row when a pet is inserted (confirmed live) — our own insert then always
+            # conflicts. Treat "already exists" as the desired end state, not a failure;
+            # anything else should still surface.
+            if not is_unique_violation(exc):
+                raise
         # Registering a pet is typically several save_onboarding_field calls in ONE turn
         # (name, then species/breed/age as the owner mentions them) — agent_ctx.pets was
         # loaded once at turn start, so without this, every call after this one can't find

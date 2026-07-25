@@ -105,40 +105,59 @@ async def run_agent_turn(
     if final_text.strip():
         await ctx.whatsapp.send_reply_and_chunk(phone, final_text)
 
-    memory.append_turn(client, phone, extracted.text, final_text)
-    await memory.extract_and_update_memory(ctx.openai, ctx.settings, client, agent_ctx.profile["id"], extracted.text, final_text)
+    # From here on the customer's reply has ALREADY been sent — everything below is
+    # bookkeeping (chat history, long-term memory, conversation logs, onboarding flag).
+    # Each step is independently wrapped: a bug in one (e.g. the messages-insert
+    # NOT-NULL violation found live in testing) must never silently prevent an
+    # unrelated one (e.g. mark_onboarding_complete_if_needed) from running too.
+    try:
+        memory.append_turn(client, phone, extracted.text, final_text)
+    except Exception:
+        logger.exception("Failed to append chat history for phone=%s", phone)
 
-    # A fresh `conversations` row per inbound message, matching n8n exactly (spec §2) —
-    # continuity lives only in the chat-memory table above, not at the DB level here.
-    conversation = client.table("conversations").insert(
-        {
-            "profile_id": agent_ctx.profile["id"],
-            "pet_id": agent_ctx.active_pet["id"] if agent_ctx.active_pet else None,
-            "channel": "whatsapp",
-            "status": "active",
-        }
-    ).execute().data[0]
+    try:
+        await memory.extract_and_update_memory(ctx.openai, ctx.settings, client, agent_ctx.profile["id"], extracted.text, final_text)
+    except Exception:
+        logger.exception("Failed to update long-term memory for profile=%s", agent_ctx.profile["id"])
 
-    client.table("messages").insert(
-        [
+    try:
+        # A fresh `conversations` row per inbound message, matching n8n exactly (spec §2) —
+        # continuity lives only in the chat-memory table above, not at the DB level here.
+        conversation = client.table("conversations").insert(
             {
-                "conversation_id": conversation["id"],
                 "profile_id": agent_ctx.profile["id"],
-                "sender_type": "vet" if role == "vet" else "user",
-                "content": extracted.text,
-                "message_type": extracted.message_type if extracted.message_type in
-                    ("text", "image", "audio", "video", "document", "location") else "text",
-            },
-            {
-                "conversation_id": conversation["id"],
-                "profile_id": agent_ctx.profile["id"],
-                "sender_type": "assistant",
-                "content": final_text,
-            },
-        ]
-    ).execute()
+                "pet_id": agent_ctx.active_pet["id"] if agent_ctx.active_pet else None,
+                "channel": "whatsapp",
+                "status": "active",
+            }
+        ).execute().data[0]
+
+        client.table("messages").insert(
+            [
+                {
+                    "conversation_id": conversation["id"],
+                    "profile_id": agent_ctx.profile["id"],
+                    "sender_type": "vet" if role == "vet" else "user",
+                    "content": extracted.text,
+                    "message_type": extracted.message_type if extracted.message_type in
+                        ("text", "image", "audio", "video", "document", "location") else "text",
+                },
+                {
+                    "conversation_id": conversation["id"],
+                    "profile_id": agent_ctx.profile["id"],
+                    "sender_type": "assistant",
+                    "content": final_text,
+                    "message_type": "text",
+                },
+            ]
+        ).execute()
+    except Exception:
+        logger.exception("Failed to log conversation/messages for profile=%s", agent_ctx.profile["id"])
 
     if role != "vet":
-        mark_onboarding_complete_if_needed(client, agent_ctx.profile, agent_ctx.onboarding)
+        try:
+            mark_onboarding_complete_if_needed(client, agent_ctx.profile, agent_ctx.onboarding)
+        except Exception:
+            logger.exception("Failed to mark onboarding complete for profile=%s", agent_ctx.profile["id"])
 
     return final_text
