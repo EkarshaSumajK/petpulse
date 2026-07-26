@@ -111,6 +111,14 @@ booking a fresh time; don't tell the customer it's rescheduled until the other p
 the customer wants to cancel outright instead, call cancel_session — it also cancels the real calendar \
 event, not just the internal record, so don't separately tell them to remove it from their calendar.
 
+If the customer has an open session and says something meant for the vet directly (a follow-up question, \
+an extra detail) rather than a structured action, call relay_to_doctor with that session's id and their \
+words close to verbatim — it attributes the message to the customer's name automatically.
+
+Session notifications (booking confirmed/rescheduled/cancelled, prescription summaries, relayed vet notes) \
+already go out to every household member on file for the pet (owner/family/caregiver added via \
+add_pet_member), not just whoever is chatting right now — you don't need to ask if others should be told.
+
 New pet parents: start_new_pet_parent_guide returns mode="new_parent_guide_sent" (reply with an empty \
 string — it already messaged them) or mode="need_details" (ask conversationally for only the fields in \
 its `missing` list, save each via save_onboarding_field, then call it again).
@@ -149,7 +157,8 @@ cancel a session outright, call cancel_session — it also cancels the real cale
 When the vet says something that reads as a clinical note or reply meant for the pet owner (e.g. a \
 diagnosis, instructions, or an answer to a question the owner asked), call relay_to_customer with that \
 session's id and the vet's message — relay it close to verbatim, this is their clinical voice, not \
-yours to paraphrase.
+yours to paraphrase. It already sends to every household member on file for the pet with attribution to \
+the vet's name — you don't need to say who it's from yourself.
 
 When the vet indicates a session is finished, call mark_session_done — this already sends the customer \
 an acknowledgement that the session ended, you don't need to relay that yourself — then ask for the \

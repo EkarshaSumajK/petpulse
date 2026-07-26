@@ -47,6 +47,7 @@ async def create_event_with_meet(
     description: str,
     start: datetime,
     end: datetime,
+    attendees: list[str] | None = None,
 ) -> dict[str, Any]:
     return await _call_bridge(
         settings,
@@ -55,16 +56,19 @@ async def create_event_with_meet(
         description=description,
         start=start.isoformat(),
         end=end.isoformat(),
+        attendees=attendees or [],
     )
 
 
-async def update_event_time(settings: Settings, event_id: str, start: datetime, end: datetime) -> dict[str, Any]:
+async def update_event_time(
+    settings: Settings, event_id: str, start: datetime, end: datetime, attendees: list[str] | None = None
+) -> dict[str, Any]:
     """Moves an EXISTING event to a new time, preserving its id/Meet link —
     used for rescheduling an already-confirmed session, so it doesn't leave
     a duplicate/orphaned calendar entry behind (confirmed live: same
     event_id and meet_link come back, only start/end change)."""
     return await _call_bridge(
-        settings, "update_event", event_id=event_id, start=start.isoformat(), end=end.isoformat()
+        settings, "update_event", event_id=event_id, start=start.isoformat(), end=end.isoformat(), attendees=attendees or []
     )
 
 

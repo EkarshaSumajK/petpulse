@@ -25,9 +25,11 @@ class _FakeQuery:
         self._op: str | None = None
         self._payload: Any = None
         self._limit: int | None = None
+        self._select_args: tuple = ()
 
-    def select(self, *_args, **_kwargs):
+    def select(self, *args, **_kwargs):
         self._op = self._op or "select"
+        self._select_args = args
         return self
 
     def insert(self, payload):
@@ -110,6 +112,18 @@ class _FakeQuery:
         matched = [row for row in table if self._matches(row)]
         if self._limit is not None:
             matched = matched[: self._limit]
+
+        select_str = " ".join(str(a) for a in self._select_args)
+        if "profiles" in select_str and self._table_name != "profiles":
+            profiles_table = self._store.setdefault("profiles", [])
+            embedded = []
+            for row in matched:
+                copy = dict(row)
+                match = next((p for p in profiles_table if p.get("id") == row.get("profile_id")), None)
+                copy["profiles"] = dict(match) if match else None
+                embedded.append(copy)
+            matched = embedded
+
         return _FakeResult(matched)
 
 

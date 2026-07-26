@@ -22,6 +22,7 @@ from app.availability.slots import IST, compute_doctor_slots
 from app.deps import AppContext
 from app.ingestion.context import AgentContext
 from app.integrations import google_calendar
+from app.integrations.supabase_client import get_pet_member_contacts
 from app.utils.pet_resolution import AMBIGUOUS_PET, resolve_pet
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,27 @@ def _get_pet(client, pet_id: str) -> dict[str, Any] | None:
         return None
     resp = client.table("pets").select("*").eq("id", pet_id).limit(1).execute()
     return resp.data[0] if resp.data else None
+
+
+async def _notify_household(ctx: AppContext, session: dict[str, Any], message: str) -> None:
+    """Session notifications (confirmed/rescheduled/cancelled/prescription)
+    go to EVERY member of the pet's household (owner/family/caregiver), not
+    just whichever one happens to be driving the current WhatsApp
+    conversation — a session concerning the pet is everyone's business.
+    Falls back to just the acting profile if the pet has no members on file
+    (e.g. pet_id missing on an older session) so a notification never
+    silently goes nowhere."""
+    client = ctx.supabase
+    pet_id = session.get("pet_id")
+    phones: set[str] = set()
+    if pet_id:
+        phones = {c["phone_number"] for c in get_pet_member_contacts(client, pet_id)}
+    if not phones:
+        profile = _get_profile(client, session["profile_id"])
+        if profile:
+            phones = {profile["phone_number"]}
+    for phone in phones:
+        await ctx.whatsapp.send_text(phone, message)
 
 
 def _normalize_to_ist(time_str: str) -> str | None:
@@ -231,8 +253,14 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
     pet = _get_pet(client, session.get("pet_id"))
     doctor_profile = client.table("profiles").select("*").eq("phone_number", doctor_phone).limit(1).execute().data
     doctor_name = doctor_profile[0].get("full_name", "your vet") if doctor_profile else "your vet"
+    doctor_email = doctor_profile[0].get("email") if doctor_profile else None
     customer_name = customer_profile.get("full_name", "the pet owner") if customer_profile else "the pet owner"
     pet_name = pet.get("name", "the pet") if pet else "the pet"
+
+    household = get_pet_member_contacts(client, session.get("pet_id")) if session.get("pet_id") else []
+    attendee_emails = [c["email"] for c in household if c.get("email")]
+    if doctor_email:
+        attendee_emails.append(doctor_email)
 
     # A calendar_event_id already on the session means this is a RESCHEDULE of an
     # already-confirmed booking (initial negotiation never sets it before this point)
@@ -243,7 +271,7 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
     event = None
     if existing_event_id:
         try:
-            event = await google_calendar.update_event_time(ctx.settings, existing_event_id, start, end)
+            event = await google_calendar.update_event_time(ctx.settings, existing_event_id, start, end, attendees=attendee_emails)
         except Exception:
             logger.exception("Failed to update existing calendar event %s, falling back to a new one", existing_event_id)
 
@@ -254,6 +282,7 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
             description=session.get("case_summary", ""),
             start=start,
             end=end,
+            attendees=attendee_emails,
         )
     meet_link = google_calendar.extract_meet_link(event)
 
@@ -270,12 +299,12 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
 
     when_text = start.strftime("%a %d %b, %I:%M %p IST")
     verb = "rescheduled to" if is_reschedule else "confirmed for"
-    if customer_profile:
-        await ctx.whatsapp.send_text(
-            customer_profile["phone_number"],
-            f"Your session with {doctor_name} for {pet_name} is {verb} {when_text}."
-            + (f"\nJoin here: {meet_link}" if meet_link else ""),
-        )
+    await _notify_household(
+        ctx,
+        session,
+        f"Your session with {doctor_name} for {pet_name} is {verb} {when_text}."
+        + (f"\nJoin here: {meet_link}" if meet_link else ""),
+    )
     await ctx.whatsapp.send_text(
         doctor_phone,
         f"Session with {customer_name} for {pet_name} is {verb} {when_text}."
@@ -387,10 +416,11 @@ async def cancel_session(ctx: AppContext, agent_ctx: AgentContext, session_id: s
             # the customer/vet, just log it for cleanup.
             logger.exception("Failed to delete calendar event %s for cancelled session %s", session["calendar_event_id"], session_id)
 
-    customer_profile = _get_profile(client, session["profile_id"])
-    other_party = session["doctor_phone"] if agent_ctx.role == "customer" else (customer_profile["phone_number"] if customer_profile else None)
-    if other_party and other_party != "pending_doctor_choice":
-        await ctx.whatsapp.send_text(other_party, "This session has been cancelled.")
+    if agent_ctx.role == "customer":
+        if session.get("doctor_phone") and session["doctor_phone"] != "pending_doctor_choice":
+            await ctx.whatsapp.send_text(session["doctor_phone"], "This session has been cancelled.")
+    else:
+        await _notify_household(ctx, session, "This session has been cancelled.")
 
     return {"success": True, "mode": "cancelled", "session_id": session_id}
 
@@ -422,17 +452,16 @@ async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id
 
     client.table("doctor_sessions").update({"status": "completed", "awaiting_from": "doctor_prescription"}).eq("id", session_id).execute()
 
-    customer_profile = _get_profile(client, session["profile_id"])
     pet = _get_pet(client, session.get("pet_id"))
     pet_name = (pet.get("name") if pet else None) or "your pet"
     doctor_name = _doctor_name(client, session.get("doctor_phone"))
 
-    if customer_profile:
-        await ctx.whatsapp.send_text(
-            customer_profile["phone_number"],
-            f"Your session with {doctor_name} for {pet_name} has ended. They'll share a summary and any "
-            "prescription/treatment notes shortly.",
-        )
+    await _notify_household(
+        ctx,
+        session,
+        f"Your session with {doctor_name} for {pet_name} has ended. They'll share a summary and any "
+        "prescription/treatment notes shortly.",
+    )
 
     return {"success": True, "mode": "session_completed", "instruction_to_llm": "Ask the vet for the prescription/treatment notes, then call file_prescription."}
 
@@ -459,19 +488,17 @@ async def file_prescription(
 
     client.table("doctor_sessions").update({"awaiting_from": None}).eq("id", session_id).execute()
 
-    customer_profile = _get_profile(client, session["profile_id"])
     pet = _get_pet(client, session.get("pet_id"))
     pet_name = (pet.get("name") if pet else None) or "your pet"
     doctor_name = _doctor_name(client, session.get("doctor_phone"))
 
-    if customer_profile:
-        summary_lines = [f"*Session summary — {pet_name} with {doctor_name}*"]
-        if session.get("case_summary"):
-            summary_lines.append(f"Reason for visit: {session['case_summary']}")
-        summary_lines.append(f"Medications: {medications}")
-        if treatment_plan:
-            summary_lines.append(f"Treatment plan: {treatment_plan}")
-        await ctx.whatsapp.send_text(customer_profile["phone_number"], "\n".join(summary_lines))
+    summary_lines = [f"*Session summary — {pet_name} with {doctor_name}*"]
+    if session.get("case_summary"):
+        summary_lines.append(f"Reason for visit: {session['case_summary']}")
+    summary_lines.append(f"Medications: {medications}")
+    if treatment_plan:
+        summary_lines.append(f"Treatment plan: {treatment_plan}")
+    await _notify_household(ctx, session, "\n".join(summary_lines))
 
     return {
         "success": True,
@@ -522,9 +549,29 @@ async def relay_to_customer(ctx: AppContext, agent_ctx: AgentContext, session_id
     if not session:
         return {"success": False, "error": "session_not_found"}
 
-    customer_profile = _get_profile(client, session["profile_id"])
-    if not customer_profile:
-        return {"success": False, "error": "customer_not_found"}
+    pet = _get_pet(client, session.get("pet_id"))
+    pet_name = (pet.get("name") if pet else None) or "your pet"
+    doctor_name = _doctor_name(client, session.get("doctor_phone"))
 
-    await ctx.whatsapp.send_text(customer_profile["phone_number"], message)
+    await _notify_household(ctx, session, f"*Message from {doctor_name}* (re: {pet_name}):\n{message}")
+    return {"success": True, "mode": "relayed", "session_id": session_id}
+
+
+async def relay_to_doctor(ctx: AppContext, agent_ctx: AgentContext, session_id: str, message: str) -> dict[str, Any]:
+    """Symmetric to relay_to_customer — lets the customer's own words reach
+    the vet verbatim (with attribution), for cases like a follow-up
+    question or extra detail that doesn't fit any structured action."""
+    client = ctx.supabase
+    session = _get_session(client, session_id)
+    if not session:
+        return {"success": False, "error": "session_not_found"}
+    if not session.get("doctor_phone") or session["doctor_phone"] == "pending_doctor_choice":
+        return {"success": False, "error": "no_doctor_assigned"}
+
+    customer_profile = _get_profile(client, session["profile_id"])
+    customer_name = (customer_profile.get("full_name") if customer_profile else None) or "the pet owner"
+    pet = _get_pet(client, session.get("pet_id"))
+    pet_name = (pet.get("name") if pet else None) or "their pet"
+
+    await ctx.whatsapp.send_text(session["doctor_phone"], f"*Message from {customer_name}* (re: {pet_name}):\n{message}")
     return {"success": True, "mode": "relayed", "session_id": session_id}

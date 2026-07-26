@@ -244,11 +244,22 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     _spec(
         "relay_to_customer",
-        "Relay a vet's clinical note/reply to the customer on a specific session, close to verbatim.",
+        "Relay a vet's clinical note/reply to the customer on a specific session, close to verbatim. Sent "
+        "with attribution to the vet's name, to EVERY member of the pet's household (owner/family/caregiver), "
+        "not just whoever is chatting right now.",
         {"session_id": _STR, "message": _STR},
         ["session_id", "message"],
         booking.relay_to_customer,
         VET,
+    ),
+    _spec(
+        "relay_to_doctor",
+        "Relay the customer's own words to the vet on a specific session, close to verbatim, with attribution "
+        "to the customer's name — for a follow-up question or detail that doesn't fit any structured action.",
+        {"session_id": _STR, "message": _STR},
+        ["session_id", "message"],
+        booking.relay_to_doctor,
+        CUSTOMER,
     ),
 ]
 

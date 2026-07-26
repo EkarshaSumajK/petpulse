@@ -35,6 +35,27 @@ def get_pets_for_profile(client: Client, profile_id: str) -> list[dict[str, Any]
     return resp.data or []
 
 
+def get_pet_member_contacts(client: Client, pet_id: str) -> list[dict[str, Any]]:
+    """Every person (owner/family/caregiver) linked to a pet — phone_number,
+    full_name, email — used to broadcast session notifications to the whole
+    household, not just whichever member happens to be driving the current
+    WhatsApp conversation. `pet_members` has two FKs into `profiles`
+    (profile_id and added_by), so the embed must be disambiguated by FK
+    name or PostgREST rejects it as ambiguous (confirmed live)."""
+    resp = (
+        client.table("pet_members")
+        .select("profile_id, role, profiles!pet_members_profile_id_fkey(phone_number, full_name, email)")
+        .eq("pet_id", pet_id)
+        .execute()
+    )
+    contacts = []
+    for row in resp.data or []:
+        profile = row.get("profiles") or {}
+        if profile.get("phone_number"):
+            contacts.append({"profile_id": row["profile_id"], "role": row.get("role"), **profile})
+    return contacts
+
+
 def get_profile_by_phone(client: Client, phone_number: str) -> dict[str, Any] | None:
     resp = client.table("profiles").select("*").eq("phone_number", phone_number).limit(1).execute()
     return resp.data[0] if resp.data else None

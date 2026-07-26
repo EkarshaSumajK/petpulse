@@ -340,3 +340,133 @@ async def test_cancel_session_survives_calendar_delete_failure(monkeypatch):
     assert result["success"] is True
     session = supabase.rows("doctor_sessions")[0]
     assert session["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_session_notifications_broadcast_to_every_household_member():
+    """A pet with multiple pet_members (owner + family added via
+    add_pet_member) must have session notifications reach ALL of them, not
+    just whichever one happens to be driving the current conversation."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "accepted"}
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "profile-2", "phone_number": "919111111111", "full_name": "John"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+            "pet_members": [
+                {"pet_id": "pet-a", "profile_id": "profile-1", "role": "owner"},
+                {"pet_id": "pet-a", "profile_id": "profile-2", "role": "family"},
+            ],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await mark_session_done(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    notified_phones = {call.args[0] for call in ctx.whatsapp.send_text.call_args_list}
+    assert notified_phones == {"919876543210", "919111111111"}
+
+
+@pytest.mark.asyncio
+async def test_relay_to_customer_attributes_to_vet_and_broadcasts():
+    from app.agent.tools.booking import relay_to_customer
+
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [{"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001"}],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "profile-2", "phone_number": "919111111111", "full_name": "John"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+            "pet_members": [
+                {"pet_id": "pet-a", "profile_id": "profile-1", "role": "owner"},
+                {"pet_id": "pet-a", "profile_id": "profile-2", "role": "family"},
+            ],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = SimpleNamespace(profile={"id": "vet-1", "phone_number": "919000000001"}, pets=[], role="vet")
+
+    result = await relay_to_customer(ctx, agent_ctx, session_id="session-a", message="Keep him hydrated and rest for 2 days.")
+
+    assert result["success"] is True
+    notified_phones = {call.args[0] for call in ctx.whatsapp.send_text.call_args_list}
+    assert notified_phones == {"919876543210", "919111111111"}
+    message = ctx.whatsapp.send_text.call_args_list[0].args[1]
+    assert "Dr. Rao" in message
+    assert "Max" in message
+    assert "Keep him hydrated" in message
+
+
+@pytest.mark.asyncio
+async def test_relay_to_doctor_attributes_to_customer():
+    from app.agent.tools.booking import relay_to_doctor
+
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [{"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001"}],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = SimpleNamespace(profile={"id": "profile-1", "phone_number": "919876543210"}, pets=[], role="customer")
+
+    result = await relay_to_doctor(ctx, agent_ctx, session_id="session-a", message="He's been vomiting again this morning.")
+
+    assert result["success"] is True
+    ctx.whatsapp.send_text.assert_awaited_once_with("919000000001", "*Message from Jane* (re: Max):\nHe's been vomiting again this morning.")
+
+
+@pytest.mark.asyncio
+async def test_finalize_booking_passes_attendee_emails(monkeypatch):
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "pending_doctor_choice",
+                    "status": "pending",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane", "email": "jane@example.com"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet", "email": "dr.rao@example.com"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+            "pet_members": [{"pet_id": "pet-a", "profile_id": "profile-1", "role": "owner"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    create_called = AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"})
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.create_event_with_meet", create_called)
+    monkeypatch.setattr("app.availability.slots.compute_doctor_slots", AsyncMock(return_value=[]))
+
+    from app.agent.tools.booking import _finalize_booking
+    from datetime import datetime as dt
+
+    session = supabase.rows("doctor_sessions")[0]
+    start = dt.fromisoformat("2026-07-28T14:00:00+05:30")
+    end = dt.fromisoformat("2026-07-28T14:30:00+05:30")
+
+    result = await _finalize_booking(ctx, session, "919000000001", start, end)
+
+    assert result["success"] is True
+    create_called.assert_awaited_once()
+    kwargs = create_called.call_args.kwargs
+    assert set(kwargs["attendees"]) == {"jane@example.com", "dr.rao@example.com"}
