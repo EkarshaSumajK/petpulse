@@ -1,4 +1,4 @@
-from app.ingestion.webhook import extract_message, verify_webhook_challenge
+from app.ingestion.webhook import extract_message, extract_status_update, verify_webhook_challenge
 
 
 def _envelope(message: dict, contacts: list | None = None) -> dict:
@@ -75,6 +75,36 @@ def test_extract_location():
 def test_extract_returns_none_for_status_update_payload():
     body = {"entry": [{"changes": [{"value": {"statuses": [{"id": "wamid.6", "status": "delivered"}]}}]}]}
     assert extract_message(body) is None
+
+
+def test_extract_status_update_parses_failed_status_with_errors():
+    body = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "statuses": [
+                                {
+                                    "id": "wamid.6",
+                                    "status": "failed",
+                                    "errors": [{"code": 131047, "title": "Re-engagement message"}],
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    status = extract_status_update(body)
+    assert status["status"] == "failed"
+    assert status["errors"][0]["code"] == 131047
+
+
+def test_extract_status_update_returns_none_for_message_payload():
+    body = _envelope({"from": "919876543210", "id": "wamid.1", "timestamp": "1700000000", "type": "text", "text": {"body": "hi"}})
+    assert extract_status_update(body) is None
 
 
 def test_invalid_missing_phone_number():

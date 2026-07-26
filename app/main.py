@@ -17,7 +17,7 @@ from app.deps import AppContext
 from app.ingestion.context import build_context
 from app.ingestion.dedup import claim
 from app.ingestion.media import process_media
-from app.ingestion.webhook import extract_message, verify_webhook_challenge
+from app.ingestion.webhook import extract_message, extract_status_update, verify_webhook_challenge
 from app.integrations.openai_client import make_openai_client
 from app.integrations.supabase_client import make_supabase_client
 from app.integrations.whatsapp import WhatsAppClient
@@ -89,6 +89,12 @@ async def receive_webhook(request: Request) -> Response:
     body = await request.json()
     extracted = extract_message(body)
     if extracted is None or not extracted.is_valid():
+        status = extract_status_update(body)
+        if status is not None:
+            if status.get("status") == "failed":
+                logger.warning("WhatsApp delivery FAILED for message %s: %s", status.get("id"), status.get("errors"))
+            else:
+                logger.info("WhatsApp status update for message %s: %s", status.get("id"), status.get("status"))
         return Response(status_code=200)  # non-message webhook event (status update, etc.) — ack and ignore
 
     if not claim(ctx.supabase, extracted.message_id):

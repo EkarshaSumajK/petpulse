@@ -121,6 +121,21 @@ def extract_message(body: dict[str, Any]) -> ExtractedMessage | None:
     )
 
 
+def extract_status_update(body: dict[str, Any]) -> dict[str, Any] | None:
+    """Pulls Meta's async delivery-status callback (sent/delivered/read/failed)
+    out of the webhook envelope — a separate event from `messages`, sent
+    AFTER the fact. We don't act on these, but logging them is the only way
+    to see WHY a message that our send API call already accepted (200 +
+    message id) never actually reached the recipient's phone — that 200
+    only means "queued", not "delivered"; real failures (wrong opt-in
+    status, 24h window expired, number not on WhatsApp, etc.) show up here,
+    not on the original send call."""
+    try:
+        return body["entry"][0]["changes"][0]["value"]["statuses"][0]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def verify_webhook_challenge(mode: str | None, token: str | None, challenge: str | None, expected_token: str) -> str | None:
     if mode == "subscribe" and token == expected_token:
         return challenge
