@@ -1,92 +1,62 @@
-"""Google Calendar client — single shared calendar for ALL vets (spec §2's
-`CustResp - Compute Doctor Slots` note: this is a real simplification in
-the live system, ported as-is rather than fixed; real per-vet availability
-would need per-vet calendars or a `doctor_id` column on a proper
-availability table).
+"""Google Calendar client — delegates to n8n's "PetPulse - Calendar Bridge"
+webhook (workflow `lW0L35AEoWQAxkNl`) rather than talking to Google's
+Calendar API directly.
 
-Auth is OAuth2 user credentials (refresh-token flow), not a service
-account — confirmed live that a bare GCP service account cannot generate
-Google Meet links via conferenceData (`Invalid conference type value`,
-since Meet auto-creation needs either a Google Workspace account with Meet
-enabled, or a real user-authenticated session). A personal/work Google
-account authenticated via OAuth2 does not have this restriction. Generate
-the refresh token once with `scripts/get_google_refresh_token.py` (see
-README) and set GOOGLE_CALENDAR_CLIENT_ID/SECRET/REFRESH_TOKEN — whichever
-account you authenticate as owns the calendar `google_calendar_id` points
-at ("primary" = that account's own default calendar).
+Why: confirmed live that a bare GCP service account cannot generate Google
+Meet links (`Invalid conference type value` — Meet auto-creation needs
+either a Google Workspace account or a real user-authenticated OAuth
+session), and running our own OAuth2 consent flow for a personal account
+requires Google app verification for anything beyond a pre-approved
+test-user allowlist. n8n already has a working, already-authorized Google
+Calendar OAuth2 credential — the one behind the real July 24th test
+bookings — so this reuses it via a small bridge workflow instead of
+duplicating that authorization from scratch. The bridge is protected by a
+shared secret (`CALENDAR_BRIDGE_SECRET`), not n8n's own auth, since it's a
+plain webhook.
 """
 
 from datetime import datetime
 from typing import Any
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+import httpx
 
 from app.config import Settings
 
-CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-
-def _get_service(settings: Settings):
-    creds = Credentials(
-        token=None,
-        refresh_token=settings.google_calendar_refresh_token,
-        client_id=settings.google_calendar_client_id,
-        client_secret=settings.google_calendar_client_secret,
-        token_uri="https://oauth2.googleapis.com/token",
-        scopes=CALENDAR_SCOPES,
-    )
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
-
-
-def list_busy_events(settings: Settings, time_min: datetime, time_max: datetime) -> list[dict[str, Any]]:
-    service = _get_service(settings)
-    resp = (
-        service.events()
-        .list(
-            calendarId=settings.google_calendar_id,
-            timeMin=time_min.isoformat(),
-            timeMax=time_max.isoformat(),
-            singleEvents=True,
-            orderBy="startTime",
+async def _call_bridge(settings: Settings, action: str, **params: Any) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            settings.calendar_bridge_url,
+            json={"secret": settings.calendar_bridge_secret, "action": action, **params},
         )
-        .execute()
-    )
-    return resp.get("items", [])
+        resp.raise_for_status()
+        result = resp.json()
+    if not result.get("success"):
+        raise RuntimeError(f"Calendar bridge action '{action}' failed: {result}")
+    return result
 
 
-def create_event_with_meet(
+async def list_busy_events(settings: Settings, time_min: datetime, time_max: datetime) -> list[dict[str, Any]]:
+    result = await _call_bridge(settings, "list_busy", time_min=time_min.isoformat(), time_max=time_max.isoformat())
+    return result.get("busy", [])
+
+
+async def create_event_with_meet(
     settings: Settings,
     summary: str,
     description: str,
     start: datetime,
     end: datetime,
 ) -> dict[str, Any]:
-    service = _get_service(settings)
-    event = {
-        "summary": summary,
-        "description": description,
-        "start": {"dateTime": start.isoformat()},
-        "end": {"dateTime": end.isoformat()},
-        "conferenceData": {
-            "createRequest": {
-                "requestId": f"petpulse-{start.timestamp()}",
-                "conferenceSolutionKey": {"type": "hangoutsMeet"},
-            }
-        },
-    }
-    created = (
-        service.events()
-        .insert(calendarId=settings.google_calendar_id, body=event, conferenceDataVersion=1)
-        .execute()
+    return await _call_bridge(
+        settings,
+        "create_event",
+        summary=summary,
+        description=description,
+        start=start.isoformat(),
+        end=end.isoformat(),
     )
-    return created
 
 
 def extract_meet_link(event: dict[str, Any]) -> str | None:
-    if event.get("hangoutLink"):
-        return event["hangoutLink"]
-    for entry_point in event.get("conferenceData", {}).get("entryPoints", []):
-        if entry_point.get("entryPointType") == "video":
-            return entry_point.get("uri")
-    return None
+    return event.get("meet_link")

@@ -9,7 +9,6 @@ overlaps a busy Google Calendar event on the single shared "primary"
 calendar.
 """
 
-import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -80,7 +79,7 @@ async def compute_doctor_slots(settings: Settings, now: datetime | None = None) 
     now = (now or datetime.now(tz=timezone.utc)).astimezone(IST)
     window_end = now + timedelta(days=MAX_DAYS)
 
-    busy_raw = await asyncio.to_thread(google_calendar.list_busy_events, settings, now, window_end)
+    busy_raw = await google_calendar.list_busy_events(settings, now, window_end)
     busy: list[tuple[datetime, datetime]] = []
     for event in busy_raw:
         start_raw = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")

@@ -26,13 +26,9 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: GOOGLE_CALENDAR_CLIENT_ID
-        sync: false
-      - key: GOOGLE_CALENDAR_CLIENT_SECRET
-        sync: false
-      - key: GOOGLE_CALENDAR_REFRESH_TOKEN
-        sync: false
-      - key: GOOGLE_CALENDAR_ID
+      - key: CALENDAR_BRIDGE_URL
+        value: https://abhilash20.app.n8n.cloud/webhook/petpulse-calendar-bridge
+      - key: CALENDAR_BRIDGE_SECRET
         sync: false
       - key: TIMEZONE
         value: Asia/Kolkata

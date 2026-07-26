@@ -25,13 +25,9 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
 
-    # Google Calendar (OAuth2 user credentials — a bare service account cannot
-    # generate Google Meet links, confirmed live; see google_calendar.py docstring
-    # and scripts/get_google_refresh_token.py for one-time setup)
-    google_calendar_client_id: str = ""
-    google_calendar_client_secret: str = ""
-    google_calendar_refresh_token: str = ""
-    google_calendar_id: str = "primary"
+    # Google Calendar (via n8n bridge workflow — see google_calendar.py docstring)
+    calendar_bridge_url: str = "https://abhilash20.app.n8n.cloud/webhook/petpulse-calendar-bridge"
+    calendar_bridge_secret: str = ""
 
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"

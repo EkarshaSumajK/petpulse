@@ -231,7 +231,7 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
     customer_name = customer_profile.get("full_name", "the pet owner") if customer_profile else "the pet owner"
     pet_name = pet.get("name", "the pet") if pet else "the pet"
 
-    event = google_calendar.create_event_with_meet(
+    event = await google_calendar.create_event_with_meet(
         ctx.settings,
         summary=f"PetPulse consult: {customer_name} & {doctor_name} ({pet_name})",
         description=session.get("case_summary", ""),

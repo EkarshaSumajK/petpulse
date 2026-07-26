@@ -31,8 +31,7 @@ uvicorn app.main:app --reload
 | `WHATSAPP_APP_SECRET` | Meta App dashboard — optional but recommended, enables `X-Hub-Signature-256` verification |
 | `OPENAI_API_KEY` | platform.openai.com |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase project settings — same project the n8n workflow already uses, no migration needed |
-| `GOOGLE_CALENDAR_CLIENT_ID` / `GOOGLE_CALENDAR_CLIENT_SECRET` / `GOOGLE_CALENDAR_REFRESH_TOKEN` | Run `python scripts/get_google_refresh_token.py <client_id> <client_secret>` once, locally, with a browser — see the script's docstring for the one-time Google Cloud Console setup. **Not** a service account: confirmed live that a bare service account can't generate Google Meet links (`Invalid conference type value`) — Meet creation needs a real user-authenticated session or a Workspace account. Whichever Google account you log in as owns the calendar. |
-| `GOOGLE_CALENDAR_ID` | The calendar to book into — `primary` (default) is that account's own default calendar; use a specific calendar ID if you want a different one |
+| `CALENDAR_BRIDGE_URL` / `CALENDAR_BRIDGE_SECRET` | Calendar bookings go through n8n's `PetPulse - Calendar Bridge` workflow (id `lW0L35AEoWQAxkNl`, on `abhilash20.app.n8n.cloud`) rather than talking to Google directly — it reuses n8n's already-authorized Google Calendar credential (the one behind the real July 24th test bookings), since a bare service account can't generate Meet links and running our own OAuth consent flow needs Google app verification. `CALENDAR_BRIDGE_SECRET` is a shared secret the bridge checks on every call (not Google credentials) — see `google_calendar.py`'s docstring for the full story. |
 
 `ffmpeg` must be on the host for video-frame/audio extraction — already installed in the provided
 Dockerfile; install separately (`brew install ffmpeg` / `apt-get install ffmpeg`) for local runs.
@@ -47,20 +46,17 @@ existing `Dockerfile` runs as-is on any of them.
 
 **Render** (`render.yaml` included, Docker-native):
 1. New Web Service → connect this repo → Render detects `render.yaml` automatically.
-2. Dashboard → Environment → fill in every var marked `sync: false` (tokens/keys) — same table as above,
-   including the three `GOOGLE_CALENDAR_*` OAuth values from the script.
+2. Dashboard → Environment → fill in every var marked `sync: false` (tokens/keys) — same table as above.
 3. Deploy, then register `https://<your-render-url>/webhook/petpulse-core` with Meta (see below).
 
 **Railway / Fly.io / a plain VM** — same `Dockerfile`, no `render.yaml` needed:
-- Railway: "Deploy from repo", it auto-detects the Dockerfile; add all env vars (including the three
-  `GOOGLE_CALENDAR_*` ones) in its dashboard.
+- Railway: "Deploy from repo", it auto-detects the Dockerfile; add all env vars in its dashboard.
 - Fly.io: `fly launch` picks up the Dockerfile; `fly secrets set` for all tokens/keys.
 - Plain VM: `docker build` + `docker run --env-file .env` exactly as in Setup above, behind whatever
   reverse proxy/TLS termination you're already using.
 
-No credential *file* is needed for Google Calendar anymore (OAuth2 user credentials are plain env vars,
-not a JSON key) — the `credentials/` volume mount above is only relevant if you still have other
-file-based secrets there.
+No credential *file* is needed for Google Calendar — it's a plain HTTPS call to the n8n bridge webhook,
+authenticated with `CALENDAR_BRIDGE_SECRET`, not a Google OAuth token of our own.
 
 ## Registering the webhook with Meta
 
