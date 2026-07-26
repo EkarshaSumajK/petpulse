@@ -25,9 +25,12 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_service_role_key: str = ""
 
-    # Google Calendar (service-account auth; the target calendar must be
-    # shared with the service account's client_email, "Make changes to events")
-    google_service_account_file: str = "credentials/google-service-account.json"
+    # Google Calendar (OAuth2 user credentials — a bare service account cannot
+    # generate Google Meet links, confirmed live; see google_calendar.py docstring
+    # and scripts/get_google_refresh_token.py for one-time setup)
+    google_calendar_client_id: str = ""
+    google_calendar_client_secret: str = ""
+    google_calendar_refresh_token: str = ""
     google_calendar_id: str = "primary"
 
     log_level: str = "INFO"

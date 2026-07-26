@@ -10,7 +10,7 @@ decides what to do: save data, run triage, book a vet session, file a document, 
 ```bash
 cp .env.example .env   # fill in the real values below
 docker build -t petpulse-backend .
-docker run -p 8000:8000 --env-file .env -v "$(pwd)/credentials:/app/credentials" petpulse-backend
+docker run -p 8000:8000 --env-file .env petpulse-backend
 ```
 
 Or locally (needs Python 3.10+ — the codebase uses `X | Y` union type hints throughout):
@@ -31,8 +31,8 @@ uvicorn app.main:app --reload
 | `WHATSAPP_APP_SECRET` | Meta App dashboard — optional but recommended, enables `X-Hub-Signature-256` verification |
 | `OPENAI_API_KEY` | platform.openai.com |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase project settings — same project the n8n workflow already uses, no migration needed |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | Path to a service-account JSON key (put the file under `credentials/`, which is git-ignored) |
-| `GOOGLE_CALENDAR_ID` | The calendar to book into — must be explicitly shared with the service account's `client_email` ("Make changes to events"); defaults to the service account's own `primary` calendar, which is fine for local testing but is NOT the real shared team calendar |
+| `GOOGLE_CALENDAR_CLIENT_ID` / `GOOGLE_CALENDAR_CLIENT_SECRET` / `GOOGLE_CALENDAR_REFRESH_TOKEN` | Run `python scripts/get_google_refresh_token.py <client_id> <client_secret>` once, locally, with a browser — see the script's docstring for the one-time Google Cloud Console setup. **Not** a service account: confirmed live that a bare service account can't generate Google Meet links (`Invalid conference type value`) — Meet creation needs a real user-authenticated session or a Workspace account. Whichever Google account you log in as owns the calendar. |
+| `GOOGLE_CALENDAR_ID` | The calendar to book into — `primary` (default) is that account's own default calendar; use a specific calendar ID if you want a different one |
 
 `ffmpeg` must be on the host for video-frame/audio extraction — already installed in the provided
 Dockerfile; install separately (`brew install ffmpeg` / `apt-get install ffmpeg`) for local runs.
@@ -47,19 +47,20 @@ existing `Dockerfile` runs as-is on any of them.
 
 **Render** (`render.yaml` included, Docker-native):
 1. New Web Service → connect this repo → Render detects `render.yaml` automatically.
-2. Dashboard → Environment → fill in every var marked `sync: false` (tokens/keys) — same table as above.
-3. Dashboard → Secret Files → add `google-service-account.json` with the service-account JSON content;
-   Render mounts it at `/etc/secrets/google-service-account.json`, which is what `GOOGLE_SERVICE_ACCOUNT_FILE`
-   in `render.yaml` already points at.
-4. Deploy, then register `https://<your-render-url>/webhook/petpulse-core` with Meta (see below).
+2. Dashboard → Environment → fill in every var marked `sync: false` (tokens/keys) — same table as above,
+   including the three `GOOGLE_CALENDAR_*` OAuth values from the script.
+3. Deploy, then register `https://<your-render-url>/webhook/petpulse-core` with Meta (see below).
 
 **Railway / Fly.io / a plain VM** — same `Dockerfile`, no `render.yaml` needed:
-- Railway: "Deploy from repo", it auto-detects the Dockerfile; add env vars in its dashboard, and use a
-  Railway **volume** (or a base64-encoded env var decoded on startup) for the Google credentials file.
-- Fly.io: `fly launch` picks up the Dockerfile; use `fly secrets set` for the tokens/keys and `fly volumes`
-  (or `fly secrets` decoded to a file at boot) for the Google credentials file.
-- Plain VM: `docker build` + `docker run --env-file .env -v ./credentials:/app/credentials` exactly as in
-  Setup above, behind whatever reverse proxy/TLS termination you're already using.
+- Railway: "Deploy from repo", it auto-detects the Dockerfile; add all env vars (including the three
+  `GOOGLE_CALENDAR_*` ones) in its dashboard.
+- Fly.io: `fly launch` picks up the Dockerfile; `fly secrets set` for all tokens/keys.
+- Plain VM: `docker build` + `docker run --env-file .env` exactly as in Setup above, behind whatever
+  reverse proxy/TLS termination you're already using.
+
+No credential *file* is needed for Google Calendar anymore (OAuth2 user credentials are plain env vars,
+not a JSON key) — the `credentials/` volume mount above is only relevant if you still have other
+file-based secrets there.
 
 ## Registering the webhook with Meta
 

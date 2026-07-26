@@ -26,8 +26,12 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: GOOGLE_SERVICE_ACCOUNT_FILE
-        value: /etc/secrets/google-service-account.json
+      - key: GOOGLE_CALENDAR_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CALENDAR_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CALENDAR_REFRESH_TOKEN
+        sync: false
       - key: GOOGLE_CALENDAR_ID
         sync: false
       - key: TIMEZONE

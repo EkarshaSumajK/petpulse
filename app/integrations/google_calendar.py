@@ -4,20 +4,22 @@ the live system, ported as-is rather than fixed; real per-vet availability
 would need per-vet calendars or a `doctor_id` column on a proper
 availability table).
 
-Auth is a Google service account (no interactive OAuth/refresh-token
-flow). For a bare service account to see/write a human-owned calendar, that
-calendar must be explicitly shared with the service account's
-`client_email` (Settings > Share with specific people > "Make changes to
-events"); otherwise it only has its own empty calendar. `settings.
-google_calendar_id` should be set to that shared calendar's ID once that's
-done — defaults to "primary" (the service account's own calendar) which
-works out of the box for local testing but isn't the real shared calendar.
+Auth is OAuth2 user credentials (refresh-token flow), not a service
+account — confirmed live that a bare GCP service account cannot generate
+Google Meet links via conferenceData (`Invalid conference type value`,
+since Meet auto-creation needs either a Google Workspace account with Meet
+enabled, or a real user-authenticated session). A personal/work Google
+account authenticated via OAuth2 does not have this restriction. Generate
+the refresh token once with `scripts/get_google_refresh_token.py` (see
+README) and set GOOGLE_CALENDAR_CLIENT_ID/SECRET/REFRESH_TOKEN — whichever
+account you authenticate as owns the calendar `google_calendar_id` points
+at ("primary" = that account's own default calendar).
 """
 
 from datetime import datetime
 from typing import Any
 
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from app.config import Settings
@@ -26,8 +28,13 @@ CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
 def _get_service(settings: Settings):
-    creds = service_account.Credentials.from_service_account_file(
-        settings.google_service_account_file, scopes=CALENDAR_SCOPES
+    creds = Credentials(
+        token=None,
+        refresh_token=settings.google_calendar_refresh_token,
+        client_id=settings.google_calendar_client_id,
+        client_secret=settings.google_calendar_client_secret,
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=CALENDAR_SCOPES,
     )
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
