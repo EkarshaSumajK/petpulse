@@ -52,6 +52,28 @@ def _format_vaccination_line(vax: dict[str, Any], today: str) -> tuple[str, bool
     return f"{detail}{flag}", overdue
 
 
+def _ambiguous_pet_result(resolution, fallback_message: str) -> dict[str, Any]:
+    """Never guess which same-named pet was meant — hand the candidates
+    (each already carrying owner_name/owner_phone, see
+    supabase_client.get_pets_for_profile) back to the LLM so IT resolves
+    the ambiguity from conversation context (e.g. an owner's name someone
+    mentioned) and re-calls with an exact pet_id, rather than code trying
+    to fuzzy-match an owner name itself."""
+    if resolution.reason == "ambiguous_pet_name" and resolution.candidates:
+        return {
+            "success": False,
+            "error": "ambiguous_pet",
+            "candidates": resolution.candidates,
+            "instruction_to_llm": (
+                "More than one pet has this name, belonging to DIFFERENT owners (see each candidate's "
+                "owner_name/owner_phone). Do not guess — use the conversation (e.g. an owner's name someone "
+                "mentioned) to work out which one is meant and call this tool again with that exact pet_id. "
+                "If you genuinely can't tell, ask which owner's pet is meant before doing anything with it."
+            ),
+        }
+    return {"success": False, "error": "ambiguous_pet", "message": fallback_message}
+
+
 async def _send_document_files(ctx: AppContext, phone: str, docs: list[dict[str, Any]], pet_name: str) -> int:
     """Signs + sends each document's storage file as a WhatsApp attachment.
     Shared by send_pet_document and get_pet_passport so the passport can
@@ -72,7 +94,7 @@ async def send_pet_document(
 ) -> dict[str, Any]:
     resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
     if resolution.ambiguous:
-        return {"success": False, "error": "ambiguous_pet", "message": "Which pet's documents?"}
+        return _ambiguous_pet_result(resolution, "Which pet's documents?")
     if not resolution.pet:
         return {"success": False, "error": "no_pet_on_file"}
 
@@ -100,7 +122,7 @@ async def get_pet_passport(
 ) -> dict[str, Any]:
     resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
     if resolution.ambiguous:
-        return {"success": False, "error": "ambiguous_pet", "message": "Which pet's passport?"}
+        return _ambiguous_pet_result(resolution, "Which pet's passport?")
     pet = resolution.pet
     if not pet:
         return {"success": False, "error": "no_pet_on_file"}
@@ -173,6 +195,7 @@ async def get_pet_passport(
 async def file_document(
     ctx: AppContext,
     agent_ctx: AgentContext,
+    pet_id: str = "",
     pet_name: str = "",
     document_type: str = "",
 ) -> dict[str, Any]:
@@ -185,8 +208,10 @@ async def file_document(
         classification.document_type if classification else "Other"
     )
     target_pet = None
-    if pet_name:
-        resolution = resolve_pet(agent_ctx.pets, pet_name=pet_name, auto_resolve_single=True)
+    if pet_id or pet_name:
+        resolution = resolve_pet(agent_ctx.pets, pet_id=pet_id, pet_name=pet_name, auto_resolve_single=True)
+        if resolution.ambiguous:
+            return _ambiguous_pet_result(resolution, "Which pet is this document for?")
         target_pet = resolution.pet
     if not target_pet and classification:
         target_pet = classification.target_pet

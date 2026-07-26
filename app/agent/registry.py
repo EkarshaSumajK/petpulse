@@ -82,7 +82,10 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     _spec(
         "send_pet_document",
-        "Send previously-filed documents for a pet back to the customer over WhatsApp.",
+        "Send previously-filed documents for a pet back to the customer over WhatsApp. If this (or any "
+        "pet-lookup tool) returns error=\"ambiguous_pet\" with `candidates`, several pets share that name "
+        "across DIFFERENT owners — use each candidate's owner_name/owner_phone plus conversation context to "
+        "work out which one was meant, then call again with its exact pet_id. Never guess.",
         {"pet_id": _STR, "pet_name": _STR, "document_type": {"type": "string", "description": "Optional filter, e.g. 'vaccination'."}},
         [],
         documents.send_pet_document,
@@ -92,7 +95,8 @@ TOOL_SPECS: list[ToolSpec] = [
         "get_pet_passport",
         "Build and return a full health-passport summary for a pet (vaccinations incl. manufacturer/batch-lot "
         "number/next-due date, recent records). Also sends any vaccination certificate files on file as WhatsApp "
-        "attachments by default.",
+        "attachments by default. On error=\"ambiguous_pet\" with `candidates`, disambiguate using each "
+        "candidate's owner_name/owner_phone and conversation context, then re-call with the exact pet_id.",
         {
             "pet_id": _STR, "pet_name": _STR,
             "send_certificates": {
@@ -107,8 +111,15 @@ TOOL_SPECS: list[ToolSpec] = [
     _spec(
         "file_document",
         "File the image/document from THIS turn into the pet's medical record. Call this when the system "
-        "prompt's document-filing rule applies to what was just uploaded.",
-        {"pet_name": _STR, "document_type": {"type": "string", "description": "Override the auto-detected type if the customer's own caption says otherwise."}},
+        "prompt's document-filing rule applies to what was just uploaded. A vet's patients can span multiple "
+        "unrelated owners — if the pet name given matches more than one (error=\"ambiguous_pet\" with "
+        "`candidates`), use each candidate's owner_name/owner_phone plus who the message named to pick the "
+        "right one, then call again with its exact pet_id instead of pet_name. Never file to a guessed pet.",
+        {
+            "pet_id": _STR,
+            "pet_name": _STR,
+            "document_type": {"type": "string", "description": "Override the auto-detected type if the customer's own caption says otherwise."},
+        },
         [],
         documents.file_document,
         BOTH,

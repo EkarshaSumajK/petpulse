@@ -32,7 +32,35 @@ def get_pets_for_profile(client: Client, profile_id: str) -> list[dict[str, Any]
         .order("created_at")
         .execute()
     )
-    return resp.data or []
+    pets = resp.data or []
+    _attach_owner_info(client, pets)
+    return pets
+
+
+def _attach_owner_info(client: Client, pets: list[dict[str, Any]]) -> None:
+    """The `pet_members` row embedded above is only the CALLER's own
+    membership on each pet — for a vet, whose patient list spans every
+    unrelated household that's added them, that says nothing about whose
+    pet it actually is. Attaches each pet's real primary owner (name +
+    phone) so the agent can tell two same-named pets apart using
+    conversation context (e.g. an owner's name the vet mentioned) instead
+    of a name-only guess — a real reported bug sent one owner's document
+    to a different owner's same-named pet."""
+    pet_ids = [p["id"] for p in pets if p.get("id")]
+    if not pet_ids:
+        return
+    resp = (
+        client.table("pet_members")
+        .select("pet_id, profiles!pet_members_profile_id_fkey(full_name, phone_number)")
+        .in_("pet_id", pet_ids)
+        .eq("is_primary", True)
+        .execute()
+    )
+    owners = {row["pet_id"]: row.get("profiles") or {} for row in (resp.data or [])}
+    for pet in pets:
+        owner = owners.get(pet.get("id")) or {}
+        pet["owner_name"] = owner.get("full_name")
+        pet["owner_phone"] = owner.get("phone_number")
 
 
 def get_pet_member_contacts(client: Client, pet_id: str) -> list[dict[str, Any]]:

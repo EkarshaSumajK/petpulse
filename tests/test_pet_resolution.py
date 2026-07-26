@@ -43,6 +43,44 @@ def test_no_pets_on_file():
     assert result.reason == "no_pets_on_file"
 
 
+def test_exact_name_shared_by_two_different_owners_is_ambiguous_not_a_silent_guess():
+    """Reproduces a real reported bug: a vet's patient list spans multiple
+    unrelated households, so two DIFFERENT owners can each have a pet
+    named the same thing. Previously the first match won silently — a
+    vaccination certificate meant for one owner's "Bobby" was filed/sent
+    to a different owner's "Bobby" instead. A duplicate exact match must
+    come back ambiguous with both candidates, never pick one blindly."""
+    bobby_1 = {"id": "b1", "name": "Bobby", "owner_name": "Abhilash", "owner_phone": "919000000001"}
+    bobby_2 = {"id": "b2", "name": "Bobby", "owner_name": "Priya", "owner_phone": "919000000002"}
+    result = resolve_pet([bobby_1, bobby_2], pet_name="bobby")
+
+    assert result.pet is None
+    assert result.ambiguous is True
+    assert result.reason == "ambiguous_pet_name"
+    assert {c["id"] for c in result.candidates} == {"b1", "b2"}
+    assert {c["owner_name"] for c in result.candidates} == {"Abhilash", "Priya"}
+
+
+def test_substring_match_shared_by_two_owners_is_also_ambiguous():
+    bobby_1 = {"id": "b1", "name": "Bobby", "owner_name": "Abhilash"}
+    bobby_junior = {"id": "b2", "name": "Bobby Junior", "owner_name": "Priya"}
+    result = resolve_pet([bobby_1, bobby_junior], pet_name="bobby")
+
+    # "bobby" is an exact match for b1 only — b2 ("Bobby Junior") isn't an exact
+    # match, so this resolves to b1 via the exact-match branch, not ambiguous.
+    assert result.pet == bobby_1
+    assert result.ambiguous is False
+
+
+def test_unique_exact_match_still_resolves_even_with_other_unrelated_pets():
+    bobby = {"id": "b1", "name": "Bobby", "owner_name": "Abhilash"}
+    max_pet = {"id": "m1", "name": "Max", "owner_name": "Priya"}
+    result = resolve_pet([bobby, max_pet], pet_name="bobby")
+
+    assert result.pet == bobby
+    assert result.ambiguous is False
+
+
 def test_active_pet_from_message_matches_single_word_name_by_token():
     pet, matched = resolve_active_pet_from_message([REX, BELLA], "how is rex doing today")
     assert pet == REX

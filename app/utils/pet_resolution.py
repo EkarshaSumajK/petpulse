@@ -10,7 +10,7 @@ turn is about:
   5. otherwise: ambiguous (caller decides how to signal that back)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 AMBIGUOUS_PET = "__AMBIGUOUS_PET__"
@@ -21,6 +21,12 @@ class PetResolution:
     pet: dict[str, Any] | None
     ambiguous: bool = False
     reason: str | None = None
+    # Populated whenever ambiguous=True — the actual candidates that tied, so the
+    # caller can hand them back to the LLM (with each pet's owner_name/owner_phone,
+    # see supabase_client.get_pets_for_profile) instead of guessing which one a
+    # name match meant. The LLM decides, using conversation context; this function
+    # never does.
+    candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 def resolve_pet(
@@ -40,20 +46,32 @@ def resolve_pet(
     if pet_name:
         needle = pet_name.strip().lower()
         if needle:
-            for pet in pets:
-                name = (pet.get("name") or "").strip().lower()
-                if name and name == needle:
-                    return PetResolution(pet=pet)
-            for pet in pets:
-                name = (pet.get("name") or "").strip().lower()
-                if name and (needle in name or name in needle):
-                    return PetResolution(pet=pet)
+            # A name match must be UNIQUE to resolve automatically — e.g. a vet's
+            # patient list spans many unrelated households, and two different
+            # owners can easily each have a pet named the same thing. Silently
+            # returning the first match risks acting on/sending data to the
+            # WRONG owner's pet (a real reported bug); multiple matches must
+            # come back as ambiguous with all candidates, never a guess.
+            exact = [p for p in pets if (p.get("name") or "").strip().lower() == needle]
+            if len(exact) == 1:
+                return PetResolution(pet=exact[0])
+            if len(exact) > 1:
+                return PetResolution(pet=None, ambiguous=True, reason="ambiguous_pet_name", candidates=exact)
+
+            partial = [
+                p for p in pets
+                if (name := (p.get("name") or "").strip().lower()) and (needle in name or name in needle)
+            ]
+            if len(partial) == 1:
+                return PetResolution(pet=partial[0])
+            if len(partial) > 1:
+                return PetResolution(pet=None, ambiguous=True, reason="ambiguous_pet_name", candidates=partial)
 
     if auto_resolve_single and len(pets) == 1:
         return PetResolution(pet=pets[0])
 
     if len(pets) > 1:
-        return PetResolution(pet=None, ambiguous=True, reason="ambiguous_pet")
+        return PetResolution(pet=None, ambiguous=True, reason="ambiguous_pet", candidates=pets)
 
     return PetResolution(pet=None, ambiguous=False, reason="not_found")
 
