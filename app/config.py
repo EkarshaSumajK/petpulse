@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
-    razorpay_consult_fee_inr: int = 500  # placeholder — set to the real consult fee
+    razorpay_consult_fee_inr: int = 399
 
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
