@@ -13,15 +13,17 @@ import pytest
 
 from app.agent.tools.booking import (
     _normalize_to_ist,
+    book_slot,
     cancel_session,
     file_prescription,
+    handle_payment_webhook,
     mark_session_done,
     propose_time,
     request_doctor_session,
     reschedule_session,
     respond_to_time_proposal,
 )
-from app.availability.slots import IST
+from app.availability.slots import IST, Slot
 from tests.fake_supabase import FakeSupabaseClient
 
 
@@ -470,3 +472,120 @@ async def test_finalize_booking_passes_attendee_emails(monkeypatch):
     create_called.assert_awaited_once()
     kwargs = create_called.call_args.kwargs
     assert set(kwargs["attendees"]) == {"jane@example.com", "dr.rao@example.com"}
+
+
+@pytest.mark.asyncio
+async def test_book_slot_requests_payment_instead_of_finalizing_immediately(monkeypatch):
+    """A booking must never go straight to a Calendar event/Meet link —
+    the consult fee has to be collected first. book_slot should hold the
+    slot on the session and send a Razorpay payment link, not confirm."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "pending"}
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    ctx.settings = SimpleNamespace(razorpay_consult_fee_inr=500, razorpay_key_id="x", razorpay_key_secret="y")
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    slot_start = "2026-07-28T14:00:00+05:30"
+    start_dt = datetime.fromisoformat(slot_start)
+    monkeypatch.setattr("app.agent.tools.booking.compute_doctor_slots", AsyncMock(return_value=[Slot(start=start_dt, end=start_dt)]))
+    create_link = AsyncMock(return_value={"id": "plink_123", "short_url": "https://rzp.io/i/abc123"})
+    monkeypatch.setattr("app.agent.tools.booking.razorpay_client.create_payment_link", create_link)
+
+    result = await book_slot(ctx, agent_ctx, session_id="session-a", slot_start=slot_start, doctor_phone="919000000001")
+
+    assert result["success"] is True
+    assert result["mode"] == "payment_requested"
+    assert result["payment_link"] == "https://rzp.io/i/abc123"
+    create_link.assert_awaited_once()
+    assert create_link.call_args.kwargs["reference_id"] == "session-a"
+
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["payment_status"] == "awaiting"
+    assert session["payment_link_id"] == "plink_123"
+    assert session["awaiting_from"] == "payment"
+    assert session["preferred_time"] == slot_start
+
+    ctx.whatsapp.send_text.assert_awaited_once()
+    assert "https://rzp.io/i/abc123" in ctx.whatsapp.send_text.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_handle_payment_webhook_finalizes_booking_on_paid_event(monkeypatch):
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "pending",
+                    "awaiting_from": "payment",
+                    "payment_status": "awaiting",
+                    "payment_link_id": "plink_123",
+                    "preferred_time": "2026-07-28T14:00:00+05:30",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+
+    create_called = AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"})
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.create_event_with_meet", create_called)
+
+    event_body = {
+        "event": "payment_link.paid",
+        "payload": {"payment_link": {"entity": {"id": "plink_123", "reference_id": "session-a"}}},
+    }
+
+    handled = await handle_payment_webhook(ctx, event_body)
+
+    assert handled is True
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["payment_status"] == "paid"
+    assert session["status"] == "accepted"
+    assert session["calendar_event_id"] == "evt-1"
+    create_called.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_payment_webhook_is_idempotent_for_already_paid_session():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "doctor_phone": "919000000001", "payment_status": "paid"}
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    event_body = {
+        "event": "payment_link.paid",
+        "payload": {"payment_link": {"entity": {"id": "plink_123", "reference_id": "session-a"}}},
+    }
+
+    handled = await handle_payment_webhook(ctx, event_body)
+
+    assert handled is False
+    ctx.whatsapp.send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_payment_webhook_ignores_non_paid_events():
+    ctx = _make_ctx()
+    event_body = {"event": "payment_link.expired", "payload": {}}
+
+    handled = await handle_payment_webhook(ctx, event_body)
+
+    assert handled is False

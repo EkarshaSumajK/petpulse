@@ -12,12 +12,14 @@ import httpx
 from fastapi import FastAPI, Request, Response
 
 from app.agent.orchestrator import run_agent_turn
+from app.agent.tools.booking import handle_payment_webhook
 from app.config import get_settings
 from app.deps import AppContext
 from app.ingestion.context import build_context
 from app.ingestion.dedup import claim
 from app.ingestion.media import process_media
 from app.ingestion.webhook import extract_message, extract_status_update, verify_webhook_challenge
+from app.integrations import razorpay_client
 from app.integrations.openai_client import make_openai_client
 from app.integrations.supabase_client import make_supabase_client
 from app.integrations.whatsapp import WhatsAppClient
@@ -118,5 +120,22 @@ async def receive_webhook(request: Request) -> Response:
         await run_agent_turn(ctx, agent_ctx, extracted, media_context, document_filing_status)
     except Exception:
         logger.exception("Failed to process inbound message %s", extracted.message_id)
+
+    return Response(status_code=200)
+
+
+@app.post("/webhook/razorpay")
+async def receive_razorpay_webhook(request: Request) -> Response:
+    ctx: AppContext = request.app.state.ctx
+    raw_body = await request.body()
+
+    if not razorpay_client.verify_webhook_signature(ctx.settings, raw_body, request.headers.get("x-razorpay-signature")):
+        return Response(status_code=403)
+
+    body = await request.json()
+    try:
+        await handle_payment_webhook(ctx, body)
+    except Exception:
+        logger.exception("Failed to process Razorpay webhook event")
 
     return Response(status_code=200)

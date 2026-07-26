@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     calendar_bridge_url: str = "https://abhilash20.app.n8n.cloud/webhook/petpulse-calendar-bridge"
     calendar_bridge_secret: str = ""
 
+    # Razorpay (Payment Links API — a booking is only confirmed/calendared once
+    # Razorpay's webhook reports the link paid, see agent/tools/booking.py)
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    razorpay_webhook_secret: str = ""
+    razorpay_consult_fee_inr: int = 500  # placeholder — set to the real consult fee
+
     log_level: str = "INFO"
     timezone: str = "Asia/Kolkata"
 

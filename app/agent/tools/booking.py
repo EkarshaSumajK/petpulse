@@ -21,7 +21,7 @@ from typing import Any
 from app.availability.slots import IST, compute_doctor_slots
 from app.deps import AppContext
 from app.ingestion.context import AgentContext
-from app.integrations import google_calendar
+from app.integrations import google_calendar, razorpay_client
 from app.integrations.supabase_client import get_pet_member_contacts
 from app.utils.pet_resolution import AMBIGUOUS_PET, resolve_pet
 
@@ -244,7 +244,72 @@ async def book_slot(ctx: AppContext, agent_ctx: AgentContext, session_id: str, s
     if not any(s.start == start for s in fresh_slots):
         return await select_doctor(ctx, agent_ctx, session_id, doctor_phone)  # slot taken, resend fresh list
 
-    return await _finalize_booking(ctx, session, doctor_phone, start, end)
+    return await _request_payment(ctx, session, doctor_phone, start)
+
+
+async def _request_payment(ctx: AppContext, session: dict[str, Any], doctor_phone: str, start: datetime) -> dict[str, Any]:
+    """Gate booking on payment: hold the slot (doctor_phone + preferred_time
+    written now so handle_payment_webhook can pick up exactly where this
+    left off) and send a Razorpay payment link instead of confirming
+    outright. The Calendar event + both-party notifications only happen
+    once Razorpay's webhook reports the link paid — never here, since
+    accepting this tool call says nothing about whether the customer ever
+    actually pays."""
+    client = ctx.supabase
+    customer_profile = _get_profile(client, session["profile_id"])
+    customer_phone = customer_profile["phone_number"]
+    customer_name = customer_profile.get("full_name") or "Pet Parent"
+
+    link = await razorpay_client.create_payment_link(
+        ctx.settings,
+        amount_inr=ctx.settings.razorpay_consult_fee_inr,
+        reference_id=session["id"],
+        description="PetPulse vet consultation fee",
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+    )
+
+    client.table("doctor_sessions").update(
+        {
+            "doctor_phone": doctor_phone,
+            "preferred_time": start.isoformat(),
+            "awaiting_from": "payment",
+            "payment_status": "awaiting",
+            "payment_link_id": link.get("id"),
+        }
+    ).eq("id", session["id"]).execute()
+
+    await ctx.whatsapp.send_text(
+        customer_phone,
+        "Almost there! Please complete the consultation fee payment to confirm your slot:\n"
+        f"{link['short_url']}\n\nYour session will be booked automatically as soon as payment is received.",
+    )
+    return {"success": True, "mode": "payment_requested", "session_id": session["id"], "payment_link": link.get("short_url")}
+
+
+async def handle_payment_webhook(ctx: AppContext, event_body: dict[str, Any]) -> bool:
+    """Razorpay's async confirmation that a payment link was actually paid —
+    the only trustworthy signal that money changed hands (the webhook
+    route's signature check happens before this is ever called). Idempotent:
+    a replayed event for a session already marked 'paid' is a no-op, so
+    Razorpay's at-least-once delivery can never double-book/double-notify."""
+    session_id = razorpay_client.extract_paid_session_id(event_body)
+    if not session_id:
+        return False
+
+    client = ctx.supabase
+    session = _get_session(client, session_id)
+    if not session or session.get("payment_status") == "paid":
+        return False
+
+    client.table("doctor_sessions").update({"payment_status": "paid"}).eq("id", session_id).execute()
+
+    start = datetime.fromisoformat(session["preferred_time"])
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=IST)
+    end = start + timedelta(minutes=SESSION_DURATION_MINUTES)
+    await _finalize_booking(ctx, session, session["doctor_phone"], start, end)
+    return True
 
 
 async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_phone: str, start: datetime, end: datetime) -> dict[str, Any]:
@@ -369,8 +434,13 @@ async def respond_to_time_proposal(ctx: AppContext, agent_ctx: AgentContext, ses
         start = datetime.fromisoformat(session["preferred_time"])
         if start.tzinfo is None:
             start = start.replace(tzinfo=IST)
-        end = start + timedelta(minutes=SESSION_DURATION_MINUTES)
-        return await _finalize_booking(ctx, session, session["doctor_phone"], start, end)
+        # A reschedule of an already-paid session (calendar_event_id already exists)
+        # skips payment — the fee was already collected the first time this session
+        # was confirmed; only a session that's never been paid for gates on payment.
+        if session.get("payment_status") == "paid" or session.get("calendar_event_id"):
+            end = start + timedelta(minutes=SESSION_DURATION_MINUTES)
+            return await _finalize_booking(ctx, session, session["doctor_phone"], start, end)
+        return await _request_payment(ctx, session, session["doctor_phone"], start)
 
     if decision == "decline":
         return await decline_session(ctx, agent_ctx, session_id)

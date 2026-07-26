@@ -26,8 +26,11 @@ logger = logging.getLogger(__name__)
 # parties directly (unconditionally, regardless of who initiated it), so
 # without suppression the agent composed a second, redundant confirmation
 # on top — the customer saw the same date/time and Meet link twice, split
-# across multiple WhatsApp bubbles.
-SELF_MESSAGING_MODES = {"doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent", "booked", "rescheduled"}
+# across multiple WhatsApp bubbles. "payment_requested" is the same class of
+# bug waiting to happen: _request_payment already sent the payment link.
+SELF_MESSAGING_MODES = {
+    "doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent", "booked", "rescheduled", "payment_requested",
+}
 
 
 def _tool_call_to_message_dict(message: Any) -> dict[str, Any]:
