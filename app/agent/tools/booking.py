@@ -14,6 +14,7 @@ agent decides *whether* to book, the tool guarantees *how*.
   doctor_phone sentinel 'pending_doctor_choice' while no vet has been chosen yet.
 """
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -22,6 +23,8 @@ from app.deps import AppContext
 from app.ingestion.context import AgentContext
 from app.integrations import google_calendar
 from app.utils.pet_resolution import AMBIGUOUS_PET, resolve_pet
+
+logger = logging.getLogger(__name__)
 
 MAX_DOCTORS_LISTED = 9
 SESSION_DURATION_MINUTES = 30
@@ -231,13 +234,27 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
     customer_name = customer_profile.get("full_name", "the pet owner") if customer_profile else "the pet owner"
     pet_name = pet.get("name", "the pet") if pet else "the pet"
 
-    event = await google_calendar.create_event_with_meet(
-        ctx.settings,
-        summary=f"PetPulse consult: {customer_name} & {doctor_name} ({pet_name})",
-        description=session.get("case_summary", ""),
-        start=start,
-        end=end,
-    )
+    # A calendar_event_id already on the session means this is a RESCHEDULE of an
+    # already-confirmed booking (initial negotiation never sets it before this point)
+    # — move the same event instead of creating a duplicate, so the Meet link and
+    # any calendar invite the parties already have keeps working.
+    existing_event_id = session.get("calendar_event_id")
+    is_reschedule = bool(existing_event_id)
+    event = None
+    if existing_event_id:
+        try:
+            event = await google_calendar.update_event_time(ctx.settings, existing_event_id, start, end)
+        except Exception:
+            logger.exception("Failed to update existing calendar event %s, falling back to a new one", existing_event_id)
+
+    if event is None:
+        event = await google_calendar.create_event_with_meet(
+            ctx.settings,
+            summary=f"PetPulse consult: {customer_name} & {doctor_name} ({pet_name})",
+            description=session.get("case_summary", ""),
+            start=start,
+            end=end,
+        )
     meet_link = google_calendar.extract_meet_link(event)
 
     client.table("doctor_sessions").update(
@@ -247,23 +264,31 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
             "doctor_phone": doctor_phone,
             "preferred_time": start.isoformat(),
             "meet_link": meet_link,
+            "calendar_event_id": event.get("event_id", existing_event_id),
         }
     ).eq("id", session["id"]).execute()
 
     when_text = start.strftime("%a %d %b, %I:%M %p IST")
+    verb = "rescheduled to" if is_reschedule else "confirmed for"
     if customer_profile:
         await ctx.whatsapp.send_text(
             customer_profile["phone_number"],
-            f"Your session with {doctor_name} for {pet_name} is confirmed for {when_text}."
+            f"Your session with {doctor_name} for {pet_name} is {verb} {when_text}."
             + (f"\nJoin here: {meet_link}" if meet_link else ""),
         )
     await ctx.whatsapp.send_text(
         doctor_phone,
-        f"New session confirmed with {customer_name} for {pet_name} at {when_text}."
+        f"Session with {customer_name} for {pet_name} is {verb} {when_text}."
         + (f"\nJoin here: {meet_link}" if meet_link else ""),
     )
 
-    return {"success": True, "mode": "booked", "session_id": session["id"], "when": when_text, "meet_link": meet_link}
+    return {
+        "success": True,
+        "mode": "rescheduled" if is_reschedule else "booked",
+        "session_id": session["id"],
+        "when": when_text,
+        "meet_link": meet_link,
+    }
 
 
 async def propose_time(
@@ -353,12 +378,33 @@ async def cancel_session(ctx: AppContext, agent_ctx: AgentContext, session_id: s
 
     client.table("doctor_sessions").update({"status": "cancelled", "awaiting_from": None}).eq("id", session_id).execute()
 
+    if session.get("calendar_event_id"):
+        try:
+            await google_calendar.delete_event(ctx.settings, session["calendar_event_id"])
+        except Exception:
+            # DB status is already the source of truth for booking state — a
+            # stale calendar entry left behind isn't a functional failure for
+            # the customer/vet, just log it for cleanup.
+            logger.exception("Failed to delete calendar event %s for cancelled session %s", session["calendar_event_id"], session_id)
+
     customer_profile = _get_profile(client, session["profile_id"])
     other_party = session["doctor_phone"] if agent_ctx.role == "customer" else (customer_profile["phone_number"] if customer_profile else None)
     if other_party and other_party != "pending_doctor_choice":
         await ctx.whatsapp.send_text(other_party, "This session has been cancelled.")
 
     return {"success": True, "mode": "cancelled", "session_id": session_id}
+
+
+async def reschedule_session(ctx: AppContext, agent_ctx: AgentContext, session_id: str, new_time: str) -> dict[str, Any]:
+    """Single, clearly-named entry point for "I need to reschedule" —
+    works whether the session is still being negotiated or already fully
+    confirmed with a real calendar event and Meet link. Proposes the new
+    time to the OTHER party for confirmation (same as initial booking
+    negotiation); the calendar event only actually moves once they accept
+    (see _finalize_booking, which reuses the existing event/Meet link
+    instead of creating a duplicate)."""
+    proposed_by = "vet" if agent_ctx.role == "vet" else "customer"
+    return await propose_time(ctx, agent_ctx, session_id=session_id, proposed_time=new_time, proposed_by=proposed_by)
 
 
 def _doctor_name(client, doctor_phone: str | None) -> str:

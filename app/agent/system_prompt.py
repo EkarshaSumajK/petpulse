@@ -104,6 +104,13 @@ tool will tell you if that's the case.
 When the customer taps a vet from the list or a time slot, that arrives as a button-tap note below — \
 call select_doctor or book_slot accordingly, don't ask them to repeat it in words.
 
+Rescheduling or cancelling: if the customer wants to change the time of a session — whether it's still \
+pending/being negotiated OR already fully confirmed with a calendar invite and Meet link — call \
+reschedule_session with the new time. It sends the new time to the vet for confirmation, exactly like \
+booking a fresh time; don't tell the customer it's rescheduled until the other party actually accepts. If \
+the customer wants to cancel outright instead, call cancel_session — it also cancels the real calendar \
+event, not just the internal record, so don't separately tell them to remove it from their calendar.
+
 New pet parents: start_new_pet_parent_guide returns mode="new_parent_guide_sent" (reply with an empty \
 string — it already messaged them) or mode="need_details" (ask conversationally for only the fields in \
 its `missing` list, save each via save_onboarding_field, then call it again).
@@ -133,6 +140,11 @@ When a button tap or a plain message indicates the vet wants to accept, decline,
 alternate time for a pending session, call accept_session / decline_session / propose_time \
 accordingly — resolve which session from the open-session context below, or ask if it's not clear \
 which one they mean.
+
+If the vet needs to reschedule a session that's already confirmed (not just a pending request), call \
+reschedule_session with the new time — it proposes the change to the customer for confirmation and, once \
+accepted, moves the same calendar event/Meet link rather than creating a new one. If the vet wants to \
+cancel a session outright, call cancel_session — it also cancels the real calendar event.
 
 When the vet says something that reads as a clinical note or reply meant for the pet owner (e.g. a \
 diagnosis, instructions, or an answer to a question the owner asked), call relay_to_customer with that \

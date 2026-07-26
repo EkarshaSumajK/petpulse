@@ -200,10 +200,22 @@ TOOL_SPECS: list[ToolSpec] = [
     ),
     _spec(
         "cancel_session",
-        "Cancel a booking session (either party).",
+        "Cancel a booking session (either party) — also cancels the real calendar event/Meet link if one exists, "
+        "not just the internal record.",
         {"session_id": _STR},
         ["session_id"],
         booking.cancel_session,
+        BOTH,
+    ),
+    _spec(
+        "reschedule_session",
+        "Reschedule a session to a new time — whether it's still being negotiated or already fully confirmed "
+        "with a calendar invite/Meet link. Sends the new time to the OTHER party for confirmation, same as "
+        "initial booking; the calendar event only actually moves once they accept, and keeps the same Meet "
+        "link rather than creating a duplicate.",
+        {"session_id": _STR, "new_time": {"type": "string", "description": "ISO 8601 timestamp for the new proposed time."}},
+        ["session_id", "new_time"],
+        booking.reschedule_session,
         BOTH,
     ),
     _spec(

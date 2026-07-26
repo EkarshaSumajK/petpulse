@@ -11,7 +11,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.agent.tools.booking import _normalize_to_ist, file_prescription, mark_session_done, propose_time, request_doctor_session
+from app.agent.tools.booking import (
+    _normalize_to_ist,
+    cancel_session,
+    file_prescription,
+    mark_session_done,
+    propose_time,
+    request_doctor_session,
+    reschedule_session,
+    respond_to_time_proposal,
+)
 from app.availability.slots import IST
 from tests.fake_supabase import FakeSupabaseClient
 
@@ -211,3 +220,123 @@ async def test_file_prescription_sends_structured_summary_to_customer():
     record = supabase.rows("medical_records")[0]
     assert record["pet_id"] == "pet-a"
     assert record["medications"] == "Amoxicillin 250mg twice daily"
+
+
+@pytest.mark.asyncio
+async def test_rescheduling_a_confirmed_session_updates_the_existing_calendar_event(monkeypatch):
+    """A session with a calendar_event_id already set means a real Meet-linked
+    event already exists (confirmed booking, not just a pending request) —
+    accepting a new proposed time for it must UPDATE that event, never create
+    a second one that leaves the old one orphaned."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "negotiating",
+                    "awaiting_from": "doctor_time_input",
+                    "preferred_time": "2026-07-28T14:00:00+05:30",
+                    "calendar_event_id": "existing-event-123",
+                    "meet_link": "https://meet.google.com/existing-link",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    create_called = AsyncMock()
+    update_called = AsyncMock(return_value={"success": True, "event_id": "existing-event-123", "meet_link": "https://meet.google.com/existing-link"})
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.create_event_with_meet", create_called)
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.update_event_time", update_called)
+
+    result = await respond_to_time_proposal(ctx, agent_ctx, session_id="session-a", decision="accept")
+
+    assert result["success"] is True
+    assert result["mode"] == "rescheduled"
+    update_called.assert_awaited_once()
+    create_called.assert_not_called()
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["calendar_event_id"] == "existing-event-123"
+    assert "rescheduled to" in ctx.whatsapp.send_text.call_args_list[0][0][1]
+
+
+@pytest.mark.asyncio
+async def test_reschedule_session_derives_proposed_by_from_role():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [{"id": "session-a", "profile_id": "profile-1", "doctor_phone": "919000000001"}],
+            "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = SimpleNamespace(profile={"id": "profile-1", "phone_number": "919876543210"}, pets=[], role="customer")
+
+    result = await reschedule_session(ctx, agent_ctx, session_id="session-a", new_time="2026-07-29T15:00:00+05:30")
+
+    assert result["success"] is True
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["status"] == "negotiating"
+    assert session["awaiting_from"] == "doctor_time_input"  # customer proposed -> awaiting the vet
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_deletes_the_real_calendar_event(monkeypatch):
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "doctor_phone": "919000000001",
+                    "calendar_event_id": "existing-event-123",
+                }
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = SimpleNamespace(profile={"id": "profile-1", "phone_number": "919876543210"}, pets=[], role="customer")
+
+    delete_called = AsyncMock()
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.delete_event", delete_called)
+
+    result = await cancel_session(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    delete_called.assert_awaited_once_with(ctx.settings, "existing-event-123")
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_survives_calendar_delete_failure(monkeypatch):
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "doctor_phone": "919000000001", "calendar_event_id": "gone-already"}
+            ],
+            "profiles": [{"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = SimpleNamespace(profile={"id": "profile-1", "phone_number": "919876543210"}, pets=[], role="customer")
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("event not found")
+
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.delete_event", boom)
+
+    result = await cancel_session(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["status"] == "cancelled"
