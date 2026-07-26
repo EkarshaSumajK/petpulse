@@ -264,6 +264,17 @@ TOOL_SPECS: list[ToolSpec] = [
         VET,
     ),
     _spec(
+        "respond_to_recording_consent",
+        "Record the customer's answer to the recording-consent question that's automatically sent right "
+        "after payment. Call this once they've replied (a button tap or a plain yes/no) — it finalizes the "
+        "booking (Calendar event + Meet link + notifications to both parties), which was held pending this "
+        "answer. Declining doesn't block the booking, it just means the vet shouldn't record.",
+        {"session_id": _STR, "consent": {"type": "boolean", "description": "true if they consent to recording, false if they decline."}},
+        ["session_id", "consent"],
+        booking.respond_to_recording_consent,
+        CUSTOMER,
+    ),
+    _spec(
         "relay_to_doctor",
         "Relay the customer's own words to the vet on a specific session, close to verbatim, with attribution "
         "to the customer's name — for a follow-up question or detail that doesn't fit any structured action.",

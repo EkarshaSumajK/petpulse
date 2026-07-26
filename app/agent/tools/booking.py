@@ -98,6 +98,8 @@ def _format_doctor_message(
         lines.append(f"When: {when_text}")
     if session.get("case_summary"):
         lines.append(f"Reason: {session['case_summary']}")
+    if session.get("recording_consent") in ("given", "declined"):
+        lines.append(f"Recording consent: {'Given' if session['recording_consent'] == 'given' else 'Declined — do not record'}")
     if meet_link:
         lines.append(f"Join: {meet_link}")
     return "\n".join(lines)
@@ -326,7 +328,12 @@ async def handle_payment_webhook(ctx: AppContext, event_body: dict[str, Any]) ->
     the only trustworthy signal that money changed hands (the webhook
     route's signature check happens before this is ever called). Idempotent:
     a replayed event for a session already marked 'paid' is a no-op, so
-    Razorpay's at-least-once delivery can never double-book/double-notify."""
+    Razorpay's at-least-once delivery can never double-book/double-notify.
+
+    Doesn't finalize the booking directly — payment only unlocks the
+    recording-consent question (see _request_recording_consent). The
+    Calendar event/Meet link/notifications only actually go out once the
+    customer answers that, via respond_to_recording_consent."""
     session_id = razorpay_client.extract_paid_session_id(event_body)
     if not session_id:
         return False
@@ -336,14 +343,55 @@ async def handle_payment_webhook(ctx: AppContext, event_body: dict[str, Any]) ->
     if not session or session.get("payment_status") == "paid":
         return False
 
-    client.table("doctor_sessions").update({"payment_status": "paid"}).eq("id", session_id).execute()
+    client.table("doctor_sessions").update(
+        {"payment_status": "paid", "awaiting_from": "recording_consent", "recording_consent": "pending"}
+    ).eq("id", session_id).execute()
+
+    await _request_recording_consent(ctx, session)
+    return True
+
+
+async def _request_recording_consent(ctx: AppContext, session: dict[str, Any]) -> None:
+    """Ask for recording consent AFTER payment, BEFORE the Calendar event/Meet
+    link is created — a deliberate ordering, not a formality tacked on
+    after the fact, so the vet's notification (see _format_doctor_message)
+    always carries a real answer, never a stale/blank one."""
+    client = ctx.supabase
+    customer_profile = _get_profile(client, session["profile_id"])
+    phone = customer_profile["phone_number"]
+    await ctx.whatsapp.send_interactive_buttons(
+        phone,
+        "Payment received! Before we confirm your vet session: this call may be recorded for quality and "
+        "record-keeping purposes. Do you consent to the session being recorded?",
+        [
+            {"id": f"recording_consent|{session['id']}|yes", "title": "Yes, I consent"},
+            {"id": f"recording_consent|{session['id']}|no", "title": "No, don't record"},
+        ],
+    )
+
+
+async def respond_to_recording_consent(
+    ctx: AppContext, agent_ctx: AgentContext, session_id: str, consent: bool
+) -> dict[str, Any]:
+    """The customer's answer to _request_recording_consent — this is what
+    actually finalizes the booking (Calendar event + Meet link +
+    notifications), which was held pending this answer. Records the
+    decision either way; declining doesn't block the booking, it just
+    means the vet shouldn't record."""
+    client = ctx.supabase
+    session = _get_session(client, session_id)
+    if not session:
+        return {"success": False, "error": "session_not_found"}
+
+    recording_consent = "given" if consent else "declined"
+    client.table("doctor_sessions").update({"recording_consent": recording_consent}).eq("id", session_id).execute()
+    session["recording_consent"] = recording_consent
 
     start = datetime.fromisoformat(session["preferred_time"])
     if start.tzinfo is None:
         start = start.replace(tzinfo=IST)
     end = start + timedelta(minutes=SESSION_DURATION_MINUTES)
-    await _finalize_booking(ctx, session, session["doctor_phone"], start, end)
-    return True
+    return await _finalize_booking(ctx, session, session["doctor_phone"], start, end)
 
 
 async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_phone: str, start: datetime, end: datetime) -> dict[str, Any]:

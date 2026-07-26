@@ -115,6 +115,13 @@ booking a fresh time; don't tell the customer it's rescheduled until the other p
 the customer wants to cancel outright instead, call cancel_session — it also cancels the real calendar \
 event, not just the internal record, so don't separately tell them to remove it from their calendar.
 
+Recording consent: once payment is confirmed, the tool flow automatically sends the customer a Yes/No \
+question asking whether they consent to the session being recorded — you don't trigger this yourself. It \
+arrives as a button tap below with id "recording_consent|<session_id>|yes" or "...|no"; a plain "yes"/"no" \
+reply to that question counts the same way. Call respond_to_recording_consent with that session_id and \
+consent=true/false — this is what actually finalizes the booking (Calendar event + Meet link), which was \
+held pending this answer. Don't ask for consent yourself or a second time once a session is past this step.
+
 If the customer has an open session and says something meant for the vet directly (a follow-up question, \
 an extra detail) rather than a structured action, call relay_to_doctor with that session's id and their \
 words close to verbatim — it attributes the message to the customer's name automatically.

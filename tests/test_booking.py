@@ -21,6 +21,7 @@ from app.agent.tools.booking import (
     propose_time,
     request_doctor_session,
     reschedule_session,
+    respond_to_recording_consent,
     respond_to_time_proposal,
 )
 from app.availability.slots import IST, Slot
@@ -516,7 +517,10 @@ async def test_book_slot_requests_payment_instead_of_finalizing_immediately(monk
 
 
 @pytest.mark.asyncio
-async def test_handle_payment_webhook_finalizes_booking_on_paid_event(monkeypatch):
+async def test_handle_payment_webhook_asks_for_recording_consent_instead_of_finalizing(monkeypatch):
+    """Payment alone must NOT create the Calendar event — the recording-consent
+    question has to go out first, and finalization waits for the customer's
+    answer (see respond_to_recording_consent)."""
     supabase = FakeSupabaseClient(
         initial={
             "doctor_sessions": [
@@ -552,11 +556,63 @@ async def test_handle_payment_webhook_finalizes_booking_on_paid_event(monkeypatc
     handled = await handle_payment_webhook(ctx, event_body)
 
     assert handled is True
+    create_called.assert_not_called()
     session = supabase.rows("doctor_sessions")[0]
     assert session["payment_status"] == "paid"
-    assert session["status"] == "accepted"
-    assert session["calendar_event_id"] == "evt-1"
+    assert session["awaiting_from"] == "recording_consent"
+    assert session["recording_consent"] == "pending"
+    assert session["status"] == "pending"  # not yet accepted — still waiting on consent
+
+    ctx.whatsapp.send_interactive_buttons.assert_awaited_once()
+    call = ctx.whatsapp.send_interactive_buttons.call_args
+    assert call.args[0] == "919876543210"
+    button_ids = {b["id"] for b in call.args[2]}
+    assert button_ids == {"recording_consent|session-a|yes", "recording_consent|session-a|no"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consent,expected", [(True, "given"), (False, "declined")])
+async def test_respond_to_recording_consent_finalizes_booking_either_way(monkeypatch, consent, expected):
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "pending",
+                    "awaiting_from": "recording_consent",
+                    "payment_status": "paid",
+                    "recording_consent": "pending",
+                    "preferred_time": "2026-07-28T14:00:00+05:30",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    create_called = AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"})
+    monkeypatch.setattr("app.agent.tools.booking.google_calendar.create_event_with_meet", create_called)
+
+    result = await respond_to_recording_consent(ctx, agent_ctx, session_id="session-a", consent=consent)
+
+    assert result["success"] is True
+    assert result["mode"] == "booked"
     create_called.assert_awaited_once()
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["recording_consent"] == expected
+    assert session["status"] == "accepted"
+
+    doctor_call = next(c for c in ctx.whatsapp.send_text.call_args_list if c.args[0] == "919000000001")
+    expected_label = "Recording consent: Given" if consent else "Recording consent: Declined — do not record"
+    assert expected_label in doctor_call.args[1]
 
 
 @pytest.mark.asyncio
