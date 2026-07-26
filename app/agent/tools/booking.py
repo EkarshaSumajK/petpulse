@@ -69,6 +69,40 @@ async def _notify_household(ctx: AppContext, session: dict[str, Any], message: s
         await ctx.whatsapp.send_text(phone, message)
 
 
+def _pet_description(pet: dict[str, Any] | None, fallback: str = "the pet") -> str:
+    if not pet:
+        return fallback
+    name = pet.get("name") or fallback
+    extras = [v for v in (pet.get("species"), pet.get("breed")) if v]
+    return f"{name} ({', '.join(extras)})" if extras else name
+
+
+def _format_doctor_message(
+    client, session: dict[str, Any], header: str, when_text: str | None = None, meet_link: str | None = None
+) -> str:
+    """Detailed, self-contained notification for the vet — enough to know
+    who/what/when without scrolling back through chat history, for the
+    three moments a session's state changes under them: assigned (booked),
+    rescheduled, cancelled."""
+    customer_profile = _get_profile(client, session["profile_id"])
+    pet = _get_pet(client, session.get("pet_id"))
+    customer_name = customer_profile.get("full_name", "Pet Parent") if customer_profile else "Pet Parent"
+    customer_phone = customer_profile.get("phone_number") if customer_profile else None
+
+    lines = [
+        header,
+        f"Patient: {_pet_description(pet)}",
+        f"Owner: {customer_name}" + (f" ({customer_phone})" if customer_phone else ""),
+    ]
+    if when_text:
+        lines.append(f"When: {when_text}")
+    if session.get("case_summary"):
+        lines.append(f"Reason: {session['case_summary']}")
+    if meet_link:
+        lines.append(f"Join: {meet_link}")
+    return "\n".join(lines)
+
+
 def _normalize_to_ist(time_str: str) -> str | None:
     """Every write of a customer/vet-supplied time string must go through
     this — an LLM-emitted ISO timestamp with no offset is ambiguous, and
@@ -370,10 +404,9 @@ async def _finalize_booking(ctx: AppContext, session: dict[str, Any], doctor_pho
         f"Your session with {doctor_name} for {pet_name} is {verb} {when_text}."
         + (f"\nJoin here: {meet_link}" if meet_link else ""),
     )
+    doctor_header = "🔄 *Session rescheduled*" if is_reschedule else "📋 *New session assigned to you*"
     await ctx.whatsapp.send_text(
-        doctor_phone,
-        f"Session with {customer_name} for {pet_name} is {verb} {when_text}."
-        + (f"\nJoin here: {meet_link}" if meet_link else ""),
+        doctor_phone, _format_doctor_message(client, session, doctor_header, when_text=when_text, meet_link=meet_link)
     )
 
     return {
@@ -486,9 +519,17 @@ async def cancel_session(ctx: AppContext, agent_ctx: AgentContext, session_id: s
             # the customer/vet, just log it for cleanup.
             logger.exception("Failed to delete calendar event %s for cancelled session %s", session["calendar_event_id"], session_id)
 
+    when_text = None
+    if session.get("preferred_time"):
+        cancelled_start = datetime.fromisoformat(session["preferred_time"])
+        if cancelled_start.tzinfo is None:
+            cancelled_start = cancelled_start.replace(tzinfo=IST)
+        when_text = cancelled_start.strftime("%a %d %b, %I:%M %p IST")
+
     if agent_ctx.role == "customer":
         if session.get("doctor_phone") and session["doctor_phone"] != "pending_doctor_choice":
-            await ctx.whatsapp.send_text(session["doctor_phone"], "This session has been cancelled.")
+            message = _format_doctor_message(client, session, "❌ *Session cancelled*", when_text=when_text)
+            await ctx.whatsapp.send_text(session["doctor_phone"], message)
     else:
         await _notify_household(ctx, session, "This session has been cancelled.")
 

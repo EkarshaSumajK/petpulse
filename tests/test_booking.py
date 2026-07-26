@@ -589,3 +589,127 @@ async def test_handle_payment_webhook_ignores_non_paid_events():
     handled = await handle_payment_webhook(ctx, event_body)
 
     assert handled is False
+
+
+@pytest.mark.asyncio
+async def test_finalize_booking_sends_a_detailed_assignment_notice_to_the_doctor(monkeypatch):
+    """The vet needs enough detail in ONE message to know who/what/when
+    without digging through chat history — patient (with species/breed),
+    owner name + phone, time, reason for visit, and the Meet link."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "pending_doctor_choice",
+                    "status": "pending",
+                    "case_summary": "Limping on left hind leg for 3 days",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max", "species": "Dog", "breed": "Labrador"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    monkeypatch.setattr(
+        "app.agent.tools.booking.google_calendar.create_event_with_meet",
+        AsyncMock(return_value={"success": True, "event_id": "evt-1", "meet_link": "https://meet.google.com/xyz"}),
+    )
+
+    from app.agent.tools.booking import _finalize_booking
+    from datetime import datetime as dt
+
+    session = supabase.rows("doctor_sessions")[0]
+    start = dt.fromisoformat("2026-07-28T14:00:00+05:30")
+    end = dt.fromisoformat("2026-07-28T14:30:00+05:30")
+
+    result = await _finalize_booking(ctx, session, "919000000001", start, end)
+
+    assert result["success"] is True
+    assert result["mode"] == "booked"
+    doctor_call = next(c for c in ctx.whatsapp.send_text.call_args_list if c.args[0] == "919000000001")
+    message = doctor_call.args[1]
+    assert "New session assigned to you" in message
+    assert "Max (Dog, Labrador)" in message
+    assert "Jane" in message and "919876543210" in message
+    assert "Limping on left hind leg for 3 days" in message
+    assert "https://meet.google.com/xyz" in message
+
+
+@pytest.mark.asyncio
+async def test_reschedule_confirmation_notifies_doctor_with_rescheduled_header(monkeypatch):
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "negotiating",
+                    "awaiting_from": "doctor_time_input",
+                    "preferred_time": "2026-07-28T14:00:00+05:30",
+                    "calendar_event_id": "existing-event-123",
+                    "meet_link": "https://meet.google.com/existing-link",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    monkeypatch.setattr(
+        "app.agent.tools.booking.google_calendar.update_event_time",
+        AsyncMock(return_value={"success": True, "event_id": "existing-event-123", "meet_link": "https://meet.google.com/existing-link"}),
+    )
+
+    result = await respond_to_time_proposal(ctx, agent_ctx=SimpleNamespace(profile={"id": "profile-1"}, pets=[]), session_id="session-a", decision="accept")
+
+    assert result["success"] is True
+    doctor_call = next(c for c in ctx.whatsapp.send_text.call_args_list if c.args[0] == "919000000001")
+    assert "Session rescheduled" in doctor_call.args[1]
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_sends_detailed_notice_to_doctor_when_customer_cancels():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "preferred_time": "2026-07-28T14:00:00+05:30",
+                    "case_summary": "Annual checkup",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max", "species": "Dog"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = SimpleNamespace(profile={"id": "profile-1", "phone_number": "919876543210"}, pets=[], role="customer")
+
+    result = await cancel_session(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    ctx.whatsapp.send_text.assert_awaited_once()
+    message = ctx.whatsapp.send_text.call_args.args[1]
+    assert ctx.whatsapp.send_text.call_args.args[0] == "919000000001"
+    assert "Session cancelled" in message
+    assert "Max (Dog)" in message
+    assert "Jane" in message and "919876543210" in message
+    assert "Annual checkup" in message
+    assert "Tue 28 Jul, 02:00 PM IST" in message
