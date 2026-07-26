@@ -19,13 +19,17 @@ document OCR text, AI summaries, image descriptions, conversation history, or ge
 record is empty, say "nothing on file" — never guess. get_pet_passport's passport_text is ground truth \
 and must never be contradicted.
 
-Multi-pet handling: never blend details across pets. If the message is ambiguous and the account has \
-more than one pet, ask which pet by name before acting. Pass the exact pet_name to every pet-specific \
-tool. If a tool returns error="ambiguous_pet", ask — don't guess or retry blind. This rule is ONLY about \
-figuring out which EXISTING pet a message refers to (symptoms, booking, documents, etc.) — it never \
-applies to introducing a pet whose name doesn't match any pet already on file. A new name is never \
-ambiguous, no matter how many other pets are on the account: call save_onboarding_field(field="pet_name", \
-...) for it directly, with no clarifying question first.
+Multi-pet handling: never blend details across pets. Ask which pet by name ONLY when the account has more \
+than one pet AND the current message genuinely doesn't say which one — never when a pet is already named. \
+Two cases are NEVER ambiguous, no matter how many other pets are on the account, and must never trigger a \
+clarifying question: (1) the message names a pet whose name doesn't match any pet already on file — that's \
+a new pet, call save_onboarding_field(field="pet_name", ...) for it directly; (2) the message names a pet \
+that DOES match one already on file (exact or clear substring match, case-insensitive) — that's this \
+existing pet, act on it directly, using its real pet_id/pet_name, ignoring every other pet on the account \
+entirely, including whichever pet any open session or active-pet default refers to. Only ask when NEITHER \
+of those applies — e.g. the message says "book a session" with no pet named at all and there's more than \
+one pet on file. Pass the exact pet_name to every pet-specific tool. If a tool still returns \
+error="ambiguous_pet" despite this, ask — don't guess or retry blind.
 
 Document filing honesty: only claim a document was "saved"/"noted"/"on file" after you have actually \
 called file_document this turn and it returned success. Never restate or summarize a document's \
@@ -194,6 +198,18 @@ def _button_tap_note(extracted: ExtractedMessage) -> str:
     return f'\n[Button tapped] id="{extracted.button_reply_id}" label="{extracted.button_reply_title or ""}"'
 
 
+def _pet_name_for(pets: list[dict], pet_id: Any) -> str:
+    """Resolves a session's pet_id (a bare UUID, not obviously any pet by
+    itself) to its actual name — without this, the agent has to silently
+    cross-reference an opaque UUID against the pets list itself, which it
+    doesn't reliably do (confirmed live: it conflated an open session for
+    one pet with a fresh request naming a completely different pet)."""
+    if not pet_id:
+        return "unknown"
+    match = next((p for p in pets if str(p.get("id")) == str(pet_id)), None)
+    return match.get("name", "unknown") if match else "unknown"
+
+
 def build_turn_context(
     agent_ctx: AgentContext,
     extracted: ExtractedMessage,
@@ -229,10 +245,22 @@ def build_turn_context(
         lines.append(f"Knowledge Base: {json.dumps(agent_ctx.knowledge_base, default=str)}")
         lines.append(f"Onboarding Status: {json.dumps(agent_ctx.onboarding, default=str)}")
         if agent_ctx.pending_negotiation:
-            lines.append(f"Pending time-negotiation awaiting your reply: {json.dumps(agent_ctx.pending_negotiation, default=str)}")
+            pet_name = _pet_name_for(agent_ctx.pets, agent_ctx.pending_negotiation.get("pet_id"))
+            lines.append(
+                f"Pending time-negotiation awaiting your reply (for pet: {pet_name}): "
+                f"{json.dumps(agent_ctx.pending_negotiation, default=str)}"
+            )
 
     if agent_ctx.open_session:
-        lines.append(f"Open booking session: {json.dumps(agent_ctx.open_session, default=str)}")
+        pet_name = _pet_name_for(agent_ctx.pets, agent_ctx.open_session.get("pet_id"))
+        lines.append(f"Open booking session (for pet: {pet_name}): {json.dumps(agent_ctx.open_session, default=str)}")
+        lines.append(
+            f"This open session is scoped ONLY to {pet_name}. If the current message names a different pet "
+            "(or the active pet above is different), treat it as a separate, fresh request for THAT pet — "
+            "e.g. call request_doctor_session for it — do not assume it continues this open session. Only "
+            "treat a bare reply (just a time, or a button tap with no pet mentioned) as continuing this "
+            f"session for {pet_name}."
+        )
 
     if media_context:
         lines.append(f"Media Context: {media_context}")
