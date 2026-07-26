@@ -21,8 +21,13 @@ logger = logging.getLogger(__name__)
 # Tool result `mode` values whose side effect (an already-sent WhatsApp
 # message) should suppress the agent's own reply text — ports `AI Response
 # Ready`'s double-check that request_doctor_session / start_new_pet_parent_guide
-# don't leave a stray duplicate message behind (spec §2).
-SELF_MESSAGING_MODES = {"doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent"}
+# don't leave a stray duplicate message behind (spec §2). "booked"/"rescheduled"
+# added after a real reported bug: _finalize_booking already messages BOTH
+# parties directly (unconditionally, regardless of who initiated it), so
+# without suppression the agent composed a second, redundant confirmation
+# on top — the customer saw the same date/time and Meet link twice, split
+# across multiple WhatsApp bubbles.
+SELF_MESSAGING_MODES = {"doctor_catalogue_sent", "new_parent_guide_sent", "slot_list_sent", "booked", "rescheduled"}
 
 
 def _tool_call_to_message_dict(message: Any) -> dict[str, Any]:
