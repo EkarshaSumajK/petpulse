@@ -11,13 +11,25 @@ every call site.
 
 from typing import Any
 
+import httpx
 from supabase import Client, create_client
 
 from app.config import Settings
 
 
 def make_supabase_client(settings: Settings) -> Client:
-    return create_client(settings.supabase_url, settings.supabase_service_role_key)
+    client = create_client(settings.supabase_url, settings.supabase_service_role_key)
+    # Confirmed live: a pooled HTTP/2 keep-alive connection that Supabase's
+    # side closed got reused anyway and raised httpcore.RemoteProtocolError
+    # ("Server disconnected") — httpx's default transport does zero retries,
+    # so that took down an entire inbound WhatsApp turn (customer got no
+    # reply at all) for a transient blip that a fresh connection would have
+    # sailed through. Retrying is safe here: these are connection failures
+    # before any response was received, never a retry of a completed write.
+    retrying_transport = httpx.HTTPTransport(retries=2)
+    client.postgrest.session._transport = retrying_transport
+    client.storage._client._transport = retrying_transport
+    return client
 
 
 def get_pets_for_profile(client: Client, profile_id: str) -> list[dict[str, Any]]:

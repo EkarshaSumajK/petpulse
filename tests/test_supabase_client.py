@@ -2,8 +2,26 @@
 patient list carry each pet's actual owner name/phone, so the agent (not
 code) can tell two same-named pets from different owners apart."""
 
-from app.integrations.supabase_client import _attach_owner_info
+from app.config import Settings
+from app.integrations.supabase_client import _attach_owner_info, make_supabase_client
 from tests.fake_supabase import FakeSupabaseClient
+
+FAKE_JWT_KEY = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.abc"
+
+
+def test_make_supabase_client_retries_transient_transport_failures():
+    """Reproduces a real production crash: a pooled HTTP/2 connection the
+    server had already closed got reused anyway, raised
+    httpcore.RemoteProtocolError("Server disconnected"), and — since
+    httpx's default transport does zero retries — took down an entire
+    inbound WhatsApp turn (no reply sent at all) for what a fresh
+    connection would have handled fine. Both the postgrest (`.table()`)
+    and storage clients must retry transient connection failures."""
+    settings = Settings(supabase_url="https://x.supabase.co", supabase_service_role_key=FAKE_JWT_KEY)
+    client = make_supabase_client(settings)
+
+    assert client.postgrest.session._transport._pool._retries == 2
+    assert client.storage._client._transport._pool._retries == 2
 
 
 def test_attach_owner_info_fills_in_each_pets_primary_owner():
