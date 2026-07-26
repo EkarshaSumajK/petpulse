@@ -361,6 +361,13 @@ async def cancel_session(ctx: AppContext, agent_ctx: AgentContext, session_id: s
     return {"success": True, "mode": "cancelled", "session_id": session_id}
 
 
+def _doctor_name(client, doctor_phone: str | None) -> str:
+    if not doctor_phone:
+        return "your vet"
+    rows = client.table("profiles").select("full_name").eq("phone_number", doctor_phone).limit(1).execute().data
+    return (rows[0].get("full_name") if rows else None) or "your vet"
+
+
 async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id: str) -> dict[str, Any]:
     client = ctx.supabase
     session = _get_session(client, session_id)
@@ -368,6 +375,19 @@ async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id
         return {"success": False, "error": "session_not_found"}
 
     client.table("doctor_sessions").update({"status": "completed", "awaiting_from": "doctor_prescription"}).eq("id", session_id).execute()
+
+    customer_profile = _get_profile(client, session["profile_id"])
+    pet = _get_pet(client, session.get("pet_id"))
+    pet_name = (pet.get("name") if pet else None) or "your pet"
+    doctor_name = _doctor_name(client, session.get("doctor_phone"))
+
+    if customer_profile:
+        await ctx.whatsapp.send_text(
+            customer_profile["phone_number"],
+            f"Your session with {doctor_name} for {pet_name} has ended. They'll share a summary and any "
+            "prescription/treatment notes shortly.",
+        )
+
     return {"success": True, "mode": "session_completed", "instruction_to_llm": "Ask the vet for the prescription/treatment notes, then call file_prescription."}
 
 
@@ -394,14 +414,25 @@ async def file_prescription(
     client.table("doctor_sessions").update({"awaiting_from": None}).eq("id", session_id).execute()
 
     customer_profile = _get_profile(client, session["profile_id"])
-    if customer_profile:
-        await ctx.whatsapp.send_text(
-            customer_profile["phone_number"],
-            f"Your vet has sent the prescription/notes from your session:\n\n{medications}"
-            + (f"\n\nTreatment plan: {treatment_plan}" if treatment_plan else ""),
-        )
+    pet = _get_pet(client, session.get("pet_id"))
+    pet_name = (pet.get("name") if pet else None) or "your pet"
+    doctor_name = _doctor_name(client, session.get("doctor_phone"))
 
-    return {"success": True, "mode": "prescription_filed", "session_id": session_id}
+    if customer_profile:
+        summary_lines = [f"*Session summary — {pet_name} with {doctor_name}*"]
+        if session.get("case_summary"):
+            summary_lines.append(f"Reason for visit: {session['case_summary']}")
+        summary_lines.append(f"Medications: {medications}")
+        if treatment_plan:
+            summary_lines.append(f"Treatment plan: {treatment_plan}")
+        await ctx.whatsapp.send_text(customer_profile["phone_number"], "\n".join(summary_lines))
+
+    return {
+        "success": True,
+        "mode": "prescription_filed",
+        "session_id": session_id,
+        "instruction_to_llm": "The session summary was already sent to the customer as a WhatsApp message — just confirm briefly to the vet, don't restate its contents.",
+    }
 
 
 async def list_my_appointments(ctx: AppContext, agent_ctx: AgentContext) -> dict[str, Any]:

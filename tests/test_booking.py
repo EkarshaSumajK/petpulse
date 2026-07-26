@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.agent.tools.booking import _normalize_to_ist, propose_time, request_doctor_session
+from app.agent.tools.booking import _normalize_to_ist, file_prescription, mark_session_done, propose_time, request_doctor_session
 from app.availability.slots import IST
 from tests.fake_supabase import FakeSupabaseClient
 
@@ -137,3 +137,77 @@ async def test_propose_time_stores_offset_aware_timestamp():
     assert result["success"] is True
     session = supabase.rows("doctor_sessions")[0]
     assert "+05:30" in session["preferred_time"]
+
+
+@pytest.mark.asyncio
+async def test_mark_session_done_acknowledges_customer_immediately():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "accepted"}
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await mark_session_done(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    ctx.whatsapp.send_text.assert_awaited_once()
+    call_args = ctx.whatsapp.send_text.call_args
+    assert call_args[0][0] == "919876543210"
+    assert "Dr. Rao" in call_args[0][1]
+    assert "Max" in call_args[0][1]
+    assert "ended" in call_args[0][1]
+
+    session = supabase.rows("doctor_sessions")[0]
+    assert session["status"] == "completed"
+    assert session["awaiting_from"] == "doctor_prescription"
+
+
+@pytest.mark.asyncio
+async def test_file_prescription_sends_structured_summary_to_customer():
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {
+                    "id": "session-a",
+                    "profile_id": "profile-1",
+                    "pet_id": "pet-a",
+                    "doctor_phone": "919000000001",
+                    "status": "completed",
+                    "case_summary": "Coughing for 2 days",
+                }
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await file_prescription(
+        ctx, agent_ctx, session_id="session-a", medications="Amoxicillin 250mg twice daily", treatment_plan="Rest for 5 days"
+    )
+
+    assert result["success"] is True
+    ctx.whatsapp.send_text.assert_awaited_once()
+    message = ctx.whatsapp.send_text.call_args[0][1]
+    assert "Max" in message
+    assert "Dr. Rao" in message
+    assert "Coughing for 2 days" in message
+    assert "Amoxicillin 250mg twice daily" in message
+    assert "Rest for 5 days" in message
+
+    record = supabase.rows("medical_records")[0]
+    assert record["pet_id"] == "pet-a"
+    assert record["medications"] == "Amoxicillin 250mg twice daily"
