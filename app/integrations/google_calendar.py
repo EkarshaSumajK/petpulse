@@ -15,6 +15,8 @@ shared secret (`CALENDAR_BRIDGE_SECRET`), not n8n's own auth, since it's a
 plain webhook.
 """
 
+import asyncio
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -22,18 +24,44 @@ import httpx
 
 from app.config import Settings
 
+logger = logging.getLogger(__name__)
+
+BRIDGE_MAX_ATTEMPTS = 3
+BRIDGE_RETRY_BACKOFF_SECONDS = 1.0
+
 
 async def _call_bridge(settings: Settings, action: str, **params: Any) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            settings.calendar_bridge_url,
-            json={"secret": settings.calendar_bridge_secret, "action": action, **params},
-        )
-        resp.raise_for_status()
-        result = resp.json()
-    if not result.get("success"):
-        raise RuntimeError(f"Calendar bridge action '{action}' failed: {result}")
-    return result
+    """Confirmed live: a single transient hiccup calling this n8n webhook (cold
+    start, a slow Google Calendar API response, a dropped connection) was
+    enough to throw select_doctor's whole compute_doctor_slots call, forcing
+    the customer to re-tap and redo part of the booking flow. Retries only
+    network-level failures and 5xx responses — a deterministic 4xx or a
+    real `{"success": false}` business response (invalid_secret,
+    unknown_action) is never worth retrying, so those raise immediately."""
+    last_exc: Exception | None = None
+    for attempt in range(1, BRIDGE_MAX_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    settings.calendar_bridge_url,
+                    json={"secret": settings.calendar_bridge_secret, "action": action, **params},
+                )
+                resp.raise_for_status()
+                result = resp.json()
+            if not result.get("success"):
+                raise RuntimeError(f"Calendar bridge action '{action}' failed: {result}")
+            return result
+        except httpx.TransportError as exc:
+            last_exc = exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500:
+                raise
+            last_exc = exc
+
+        if attempt < BRIDGE_MAX_ATTEMPTS:
+            logger.warning("Calendar bridge action '%s' failed (attempt %d/%d): %s", action, attempt, BRIDGE_MAX_ATTEMPTS, last_exc)
+            await asyncio.sleep(BRIDGE_RETRY_BACKOFF_SECONDS * attempt)
+    raise last_exc
 
 
 async def list_busy_events(settings: Settings, time_min: datetime, time_max: datetime) -> list[dict[str, Any]]:

@@ -608,6 +608,11 @@ async def mark_session_done(ctx: AppContext, agent_ctx: AgentContext, session_id
     session = _get_session(client, session_id)
     if not session:
         return {"success": False, "error": "session_not_found"}
+    if session.get("status") == "completed":
+        # Idempotent: a re-tap, a re-sent "done"/similar message, or the vet
+        # saying it twice must never re-notify the customer that the session
+        # ended a second time.
+        return {"success": True, "mode": "already_completed", "session_id": session_id}
 
     client.table("doctor_sessions").update({"status": "completed", "awaiting_from": "doctor_prescription"}).eq("id", session_id).execute()
 

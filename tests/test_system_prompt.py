@@ -7,9 +7,23 @@ had to silently cross-reference it against the pets list and didn't
 reliably do so. Fix: resolve the name explicitly and state in the prompt
 that the open session is scoped to that pet only."""
 
-from app.agent.system_prompt import _pet_name_for, build_turn_context
+from app.agent.system_prompt import GREETING_RULE, _pet_name_for, build_system_prompt, build_turn_context
 from app.ingestion.context import AgentContext
 from app.ingestion.webhook import ExtractedMessage
+
+
+def test_greeting_rule_forbids_unprompted_symptom_recap():
+    """Reproduces a real reported bug: a bare "Hi" got a full unsolicited
+    severity re-assessment of an old on-file symptom instead of a plain
+    greeting — "continue naturally" wasn't enough of a constraint on its
+    own."""
+    assert "never proactively" in GREETING_RULE
+    assert "severity assessment" in GREETING_RULE
+
+
+def test_greeting_rule_only_applies_to_customer_role():
+    assert GREETING_RULE in build_system_prompt("customer")
+    assert GREETING_RULE not in build_system_prompt("vet")
 
 PETS = [
     {"id": "pet-thomas", "name": "Thomas", "species": "Dog"},

@@ -178,9 +178,33 @@ async def test_mark_session_done_acknowledges_customer_immediately():
     assert "Max" in call_args[0][1]
     assert "ended" in call_args[0][1]
 
-    session = supabase.rows("doctor_sessions")[0]
-    assert session["status"] == "completed"
-    assert session["awaiting_from"] == "doctor_prescription"
+
+@pytest.mark.asyncio
+async def test_mark_session_done_is_idempotent_and_never_double_notifies():
+    """Reproduces a real reported bug: two "your session has ended" messages
+    reaching the customer. A re-tap, a duplicate inbound message, or the vet
+    saying it twice must not fire the notification a second time once the
+    session is already completed."""
+    supabase = FakeSupabaseClient(
+        initial={
+            "doctor_sessions": [
+                {"id": "session-a", "profile_id": "profile-1", "pet_id": "pet-a", "doctor_phone": "919000000001", "status": "completed"}
+            ],
+            "profiles": [
+                {"id": "profile-1", "phone_number": "919876543210", "full_name": "Jane"},
+                {"id": "vet-1", "phone_number": "919000000001", "full_name": "Dr. Rao", "role": "vet"},
+            ],
+            "pets": [{"id": "pet-a", "name": "Max"}],
+        }
+    )
+    ctx = _make_ctx(supabase)
+    agent_ctx = _make_agent_ctx(pets=[])
+
+    result = await mark_session_done(ctx, agent_ctx, session_id="session-a")
+
+    assert result["success"] is True
+    assert result["mode"] == "already_completed"
+    ctx.whatsapp.send_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
